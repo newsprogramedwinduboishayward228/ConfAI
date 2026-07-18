@@ -201,9 +201,8 @@ fn provider_from_fields(id: &str, fields: &ProviderFields) -> Result<Provider> {
     provider.wire_api = wire_api;
 
     for raw in &fields.extras {
-        let (key, value) = raw
-            .split_once('=')
-            .with_context(|| format!("--set expects KEY=VALUE, got {raw:?}"))?;
+        let (key, value) =
+            raw.split_once('=').with_context(|| format!("--set expects KEY=VALUE, got {raw:?}"))?;
         provider.extras.insert(key.trim().to_string(), value.trim().to_string());
     }
     Ok(provider)
@@ -233,12 +232,7 @@ fn provider_add(
         config.save()?;
 
         let verb = if existed { "updated" } else { "added" };
-        println!(
-            "{} {verb} {} in {}",
-            ui::green("✓"),
-            ui::bold(id),
-            entry.info().name
-        );
+        println!("{} {verb} {} in {}", ui::green("✓"), ui::bold(id), entry.info().name);
         if select {
             println!("  {} now routes through {id}", entry.info().name);
         }
@@ -315,7 +309,12 @@ fn provider_check(id: Option<&str>, target: &Target, timeout: Duration) -> Resul
                 continue;
             };
 
-            let result = net::probe::probe(base_url, provider.api_key.as_deref(), provider.wire_api, timeout);
+            let result = net::probe::probe(
+                base_url,
+                provider.api_key.as_deref(),
+                provider.wire_api,
+                timeout,
+            );
             let (icon, summary) = if result.alive() {
                 (ui::green("✓"), ui::green(&result.summary()))
             } else {
@@ -340,7 +339,13 @@ fn provider_check(id: Option<&str>, target: &Target, timeout: Duration) -> Resul
     Ok(())
 }
 
-fn provider_sync(id: &str, target: &Target, refresh: bool, prune: bool, dry_run: bool) -> Result<()> {
+fn provider_sync(
+    id: &str,
+    target: &Target,
+    refresh: bool,
+    prune: bool,
+    dry_run: bool,
+) -> Result<()> {
     let agents = if target.all { resolve(target)? } else { vec![resolve_one(target)?] };
     let mut touched = false;
 
@@ -364,12 +369,7 @@ fn provider_sync(id: &str, target: &Target, refresh: bool, prune: bool, dry_run:
             continue;
         }
         config.save()?;
-        println!(
-            "{} {summary} for {} in {}",
-            ui::green("✓"),
-            ui::bold(id),
-            entry.info().name
-        );
+        println!("{} {summary} for {} in {}", ui::green("✓"), ui::bold(id), entry.info().name);
     }
 
     if !touched {
@@ -489,10 +489,8 @@ fn preset_show(id: &str) -> Result<()> {
     let mut table = Table::new(["field", "value"]);
     table.row(["provider id", &provider.id]);
     table.row(["base url", provider.base_url.as_deref().unwrap_or("-")]);
-    table.row([
-        "wire api",
-        &provider.wire_api.map(|w| w.to_string()).unwrap_or_else(|| "-".into()),
-    ]);
+    table
+        .row(["wire api", &provider.wire_api.map(|w| w.to_string()).unwrap_or_else(|| "-".into())]);
     table.row([
         "api key",
         &match (&entry.api_key_env, provider.api_key.as_deref()) {
@@ -547,7 +545,11 @@ fn preset_apply(
 
         if sync {
             if let Err(err) = sync_into(config.as_mut(), &provider.id, false, false) {
-                eprintln!("{} sync skipped for {}: {err:#}", ui::yellow("!"), agent_entry.info().name);
+                eprintln!(
+                    "{} sync skipped for {}: {err:#}",
+                    ui::yellow("!"),
+                    agent_entry.info().name
+                );
             }
         }
         if select {
@@ -704,16 +706,11 @@ fn about() -> Result<()> {
     let home = dirs::home_dir().map(|home| home.join(".confai"));
     table.row([
         "state",
-        &home
-            .as_ref()
-            .map(|dir| dir.display().to_string())
-            .unwrap_or_else(|| "-".into()),
+        &home.as_ref().map(|dir| dir.display().to_string()).unwrap_or_else(|| "-".into()),
     ]);
     table.row([
         "presets",
-        &preset::user_dir()
-            .map(|dir| dir.display().to_string())
-            .unwrap_or_else(|| "-".into()),
+        &preset::user_dir().map(|dir| dir.display().to_string()).unwrap_or_else(|| "-".into()),
     ]);
     table.row([
         "model catalogue",
@@ -775,7 +772,8 @@ mod tests {
 
     #[test]
     fn fields_become_a_provider() {
-        let provider = provider_from_fields("byesu", &fields(&["requires_openai_auth=true"])).unwrap();
+        let provider =
+            provider_from_fields("byesu", &fields(&["requires_openai_auth=true"])).unwrap();
         assert_eq!(provider.id, "byesu");
         assert_eq!(provider.wire_api, Some(WireApi::Responses));
         assert_eq!(provider.extras.get("requires_openai_auth").map(String::as_str), Some("true"));

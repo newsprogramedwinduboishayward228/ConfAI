@@ -1,0 +1,93 @@
+name: New preset
+description: Request a built-in preset for an endpoint or gateway
+labels: [preset]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A preset is one TOML file in `presets/` — see CONTRIBUTING.md if you
+        would rather send the pull request yourself. Do not put an API key
+        anywhere in this issue.
+
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      description: What the service calls itself.
+    validations:
+      required: true
+
+  - type: input
+    id: base-url
+    attributes:
+      label: Endpoint base URL
+      description: Including the version path, exactly as a client should use it.
+      placeholder: https://example.com/v1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: wire-api
+    attributes:
+      label: Wire API
+      description: Which protocol the endpoint speaks.
+      options:
+        - chat (OpenAI /v1/chat/completions)
+        - responses (OpenAI /v1/responses)
+        - anthropic (/v1/messages)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: needs-key
+    attributes:
+      label: Does it need an API key
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+
+  - type: input
+    id: key-env
+    attributes:
+      label: Environment variable for the key
+      description: >
+        The variable the service documents, if it has one. This becomes
+        `api_key_env`, so `confai preset apply` can pick the key up without it
+        being typed on the command line.
+      placeholder: EXAMPLE_API_KEY
+    validations:
+      required: false
+
+  - type: input
+    id: homepage
+    attributes:
+      label: Homepage
+      description: Where a user signs up and gets a key.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: models-endpoint
+    attributes:
+      label: Does it serve /v1/models
+      description: >
+        Presets do not hard-code model lists; `confai provider sync` reads them
+        from the endpoint.
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything unusual
+      description: >
+        Non-standard headers, required extra config keys, or quirks that need a
+        `[provider].extras` entry.
+    validations:
+      required: false

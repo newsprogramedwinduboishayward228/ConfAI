@@ -41,9 +41,7 @@ pub fn object_mut<'a>(root: &'a mut Value, key: &str) -> Result<&'a mut Map<Stri
         .entry(key.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
 
-    holder
-        .as_object_mut()
-        .with_context(|| format!("`{key}` is not a JSON object"))
+    holder.as_object_mut().with_context(|| format!("`{key}` is not a JSON object"))
 }
 
 /// Borrow `root[key]` as an object without creating it.
@@ -131,7 +129,10 @@ mod tests {
     #[test]
     fn nested_strings_resolve_through_missing_levels() {
         let value = json!({ "options": { "baseURL": "https://byesu.com/v1" } });
-        assert_eq!(string_at(&value, &["options", "baseURL"]).as_deref(), Some("https://byesu.com/v1"));
+        assert_eq!(
+            string_at(&value, &["options", "baseURL"]).as_deref(),
+            Some("https://byesu.com/v1")
+        );
         assert!(string_at(&value, &["options", "apiKey"]).is_none());
         assert!(string_at(&value, &["missing", "baseURL"]).is_none());
     }

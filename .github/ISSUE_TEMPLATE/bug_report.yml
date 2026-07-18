@@ -1,0 +1,78 @@
+name: Bug report
+description: Something ConfAI did to a config, or refused to do
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste a real API key. Every field below that asks for config
+        content asks for it with secrets replaced by `REDACTED`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      description: Which agent's config was involved.
+      options:
+        - Codex
+        - Claude Code
+        - opencode
+        - More than one
+        - Not agent-specific
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: confai --version
+      description: Paste the version line.
+      placeholder: confai 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Ubuntu 24.04 / Windows 11 / macOS 15.3 (Apple silicon)
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: >
+        The part of the config that reproduces this — the provider entry and
+        anything around it that matters. Replace every API key, token and
+        personal path with `REDACTED`. If a host name is part of the bug, say
+        which gateway it is rather than pasting a private URL.
+      render: toml
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Command output
+      description: Any error message, with secrets redacted.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have removed every API key, token and personal path from this report.
+          required: true

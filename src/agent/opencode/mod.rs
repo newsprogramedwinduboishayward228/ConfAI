@@ -126,9 +126,7 @@ impl OpenCodeConfig {
     /// Splice a model into `models`, preserving any keys ConfAI does not model
     /// (`variants`, `reasoning`, and whatever opencode adds next).
     fn write_model(models: &mut Map<String, Value>, model: &Model) {
-        let entry = models
-            .entry(model.id.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
+        let entry = models.entry(model.id.clone()).or_insert_with(|| Value::Object(Map::new()));
         let Some(spec) = entry.as_object_mut() else {
             *entry = json!({ "name": model.label() });
             return;
@@ -141,9 +139,7 @@ impl OpenCodeConfig {
         if model.context_limit.is_none() && model.output_limit.is_none() {
             return;
         }
-        let limit = spec
-            .entry("limit".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
+        let limit = spec.entry("limit".to_string()).or_insert_with(|| Value::Object(Map::new()));
         if let Some(limit) = limit.as_object_mut() {
             if let Some(context) = model.context_limit {
                 limit.insert("context".into(), json!(context));
@@ -196,14 +192,12 @@ impl AgentConfig for OpenCodeConfig {
         // A key already inline in the config stays inline; anything else goes to
         // the credential file, where `opencode auth login` puts it. Moving a
         // secret between files behind the user's back would be worse than either.
-        let key_is_inline = json::string_at(&self.root, &["provider", &merged.id, "options", "apiKey"])
-            .is_some();
+        let key_is_inline =
+            json::string_at(&self.root, &["provider", &merged.id, "options", "apiKey"]).is_some();
         let inline_key = merged.api_key.clone().filter(|_| key_is_inline);
 
         let providers = json::object_mut(&mut self.root, "provider")?;
-        let entry = providers
-            .entry(merged.id.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
+        let entry = providers.entry(merged.id.clone()).or_insert_with(|| Value::Object(Map::new()));
         let entry = entry
             .as_object_mut()
             .with_context(|| format!("`provider.{}` is not a JSON object", merged.id))?;
@@ -220,9 +214,8 @@ impl AgentConfig for OpenCodeConfig {
         json::set_or_clear(entry, "npm", npm.map(Value::from));
 
         if merged.base_url.is_some() || inline_key.is_some() {
-            let options = entry
-                .entry("options".to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
+            let options =
+                entry.entry("options".to_string()).or_insert_with(|| Value::Object(Map::new()));
             if let Some(options) = options.as_object_mut() {
                 if let Some(url) = &merged.base_url {
                     options.insert("baseURL".into(), json!(url));
@@ -234,9 +227,8 @@ impl AgentConfig for OpenCodeConfig {
         }
 
         if !merged.models.is_empty() {
-            let models = entry
-                .entry("models".to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
+            let models =
+                entry.entry("models".to_string()).or_insert_with(|| Value::Object(Map::new()));
             if let Some(models) = models.as_object_mut() {
                 for model in &merged.models {
                     Self::write_model(models, model);
@@ -296,15 +288,13 @@ impl AgentConfig for OpenCodeConfig {
     fn set_active_provider(&mut self, id: &str) -> Result<()> {
         validate_provider_id(id)?;
 
-        let provider = self
-            .provider(id)
-            .with_context(|| format!("opencode has no provider {id:?}"))?;
+        let provider =
+            self.provider(id).with_context(|| format!("opencode has no provider {id:?}"))?;
 
         // Keep the current model when the target provider serves it, so switching
         // between two gateways that both host a model is not also a model change.
-        let current = self.model().and_then(|m| {
-            m.split_once('/').map(|(_, model)| model.to_string())
-        });
+        let current =
+            self.model().and_then(|m| m.split_once('/').map(|(_, model)| model.to_string()));
         let model = current
             .filter(|m| provider.models.iter().any(|candidate| &candidate.id == m))
             .or_else(|| provider.models.first().map(|m| m.id.clone()))

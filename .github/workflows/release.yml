@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      # The archive name carries the tag, so a downloaded file still says which
+      # release it came from once it is out of the browser's download list.
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="confai-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/confai" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          rm -rf "dist/$name"
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          name="confai-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/confai.exe" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          (cd dist && 7z a "$name.zip" "$name" >/dev/null)
+          rm -rf "dist/$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: confai-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # One checksum file for the whole release, with plain file names, so
+      # `sha256sum -c` works in the directory the archives were downloaded into.
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

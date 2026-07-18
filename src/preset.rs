@@ -84,10 +84,9 @@ impl Preset {
     /// preset's environment variable.
     pub fn provider(&self, api_key: Option<&str>) -> Result<Provider> {
         let wire_api = match &self.provider.wire_api {
-            Some(raw) => Some(
-                WireApi::parse(raw)
-                    .with_context(|| format!("preset {:?} has an unknown wire_api {raw:?}", self.id))?,
-            ),
+            Some(raw) => Some(WireApi::parse(raw).with_context(|| {
+                format!("preset {:?} has an unknown wire_api {raw:?}", self.id)
+            })?),
             None => None,
         };
 
@@ -236,7 +235,9 @@ output = 128000
 
     #[test]
     fn an_unknown_wire_api_is_rejected_with_the_preset_named() {
-        let preset = parse(SAMPLE.replace(r#"wire_api = "chat""#, r#"wire_api = "carrier-pigeon""#).as_str());
+        let preset = parse(
+            SAMPLE.replace(r#"wire_api = "chat""#, r#"wire_api = "carrier-pigeon""#).as_str(),
+        );
         let err = preset.provider(None).unwrap_err().to_string();
         assert!(err.contains("byesu") && err.contains("carrier-pigeon"), "{err}");
     }

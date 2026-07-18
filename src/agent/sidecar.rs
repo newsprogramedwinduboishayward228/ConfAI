@@ -28,8 +28,7 @@ impl Sidecar {
         let providers = if text.trim().is_empty() {
             Vec::new()
         } else {
-            serde_json::from_str(&text)
-                .with_context(|| format!("parsing {}", path.display()))?
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
         };
         Ok(Self { path, providers })
     }
@@ -111,7 +110,10 @@ mod tests {
     use super::*;
 
     fn sidecar() -> Sidecar {
-        Sidecar { path: std::env::temp_dir().join("confai-sidecar-test.json"), providers: Vec::new() }
+        Sidecar {
+            path: std::env::temp_dir().join("confai-sidecar-test.json"),
+            providers: Vec::new(),
+        }
     }
 
     #[test]

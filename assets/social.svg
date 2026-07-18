@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="ConfAI — one editor for every AI agent's config">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#1e1b1a"/>
+      <stop offset="1" stop-color="#121010"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8574c"/>
+      <stop offset="1" stop-color="#b8352d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#e8574c" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#e8574c" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#plate)"/>
+  <circle cx="1010" cy="300" r="330" fill="url(#glow)"/>
+
+  <g transform="translate(148 172)">
+    <path d="M0-52 52 0 0 52-52 0Z" fill="url(#ember)"/>
+    <path d="M0-52 0 52" stroke="#121010" stroke-width="5"/>
+    <circle cx="0" cy="0" r="11" fill="#121010"/>
+    <circle cx="0" cy="0" r="5" fill="#f4a49b"/>
+  </g>
+
+  <text class="mono" x="228" y="196" font-size="92" font-weight="700" letter-spacing="-3" fill="#e2dfdb">Conf<tspan fill="#e8574c">AI</tspan></text>
+  <text class="mono" x="232" y="252" font-size="27" fill="#8b8580">one editor for every AI agent&#39;s config</text>
+
+  <g class="mono" font-size="19" fill="#78726b">
+    <text x="232" y="322">$ confai preset apply byesu --all --use</text>
+    <text x="232" y="356" fill="#7ebf6f">✓ applied byesu to Codex</text>
+    <text x="232" y="390" fill="#7ebf6f">✓ applied byesu to Claude Code</text>
+    <text x="232" y="424" fill="#7ebf6f">✓ applied byesu to opencode</text>
+  </g>
+
+  <!-- Three configs, one editor: the premise, stated once. -->
+  <g class="mono" font-size="20" transform="translate(0 150)">
+    <g fill="#8b8580" text-anchor="end">
+      <text x="1052" y="0">~/.codex/config.toml</text>
+      <text x="1052" y="46">~/.claude/settings.json</text>
+      <text x="1052" y="92">opencode.json</text>
+    </g>
+    <g stroke="#6b3a35" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <path d="M1068 -6 H1096"/>
+      <path d="M1068 40 H1096"/>
+      <path d="M1068 86 H1096"/>
+      <path d="M1096 -6 V86"/>
+    </g>
+    <path d="M1096 40 H1124" stroke="#e8574c" stroke-width="2.5" stroke-linecap="round"/>
+    <g transform="translate(1160 40)">
+      <path d="M0-30 30 0 0 30-30 0Z" fill="url(#ember)"/>
+      <path d="M0-30 0 30" stroke="#121010" stroke-width="3.5"/>
+      <circle cx="0" cy="0" r="7" fill="#121010"/>
+      <circle cx="0" cy="0" r="3" fill="#f4a49b"/>
+    </g>
+  </g>
+
+  <path d="M232 496 H1200" stroke="#2c2523" stroke-width="1"/>
+
+  <g class="mono" font-size="20" fill="#58544f">
+    <text x="232" y="538">comments preserved</text>
+    <text x="232" y="568">atomic writes, one-step undo</text>
+    <text x="620" y="538">limits from models.dev</text>
+    <text x="620" y="568">endpoint health checks</text>
+    <text x="948" y="538">presets, one command</text>
+    <text x="948" y="568">auto-detects what you have</text>
+  </g>
+
+  <g class="mono" font-size="20">
+    <text x="232" y="612" fill="#78726b">redstone.md</text>
+    <text x="1200" y="612" fill="#3f3a36" text-anchor="end">Rust · MIT</text>
+  </g>
+</svg>

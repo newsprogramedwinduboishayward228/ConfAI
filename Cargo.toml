@@ -9,6 +9,8 @@ repository = "https://github.com/redstone-md/ConfAI"
 homepage = "https://redstone.md"
 license = "MIT"
 readme = "README.md"
+# Banners and screenshots are for the repository, not for the crate tarball.
+exclude = ["assets/", ".github/"]
 keywords = ["cli", "config", "ai", "agent", "tui"]
 categories = ["command-line-utilities", "config"]
 

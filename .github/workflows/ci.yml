@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The crate has a build script that reads `presets/`, but it only needs the
+  # checked-out tree, so a stock toolchain is enough on every platform.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --lib --bins --tests -- -D warnings
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check

@@ -155,13 +155,10 @@ pub fn installed() -> Vec<Box<dyn Agent>> {
 /// Look an agent up by id, whether or not it is installed.
 pub fn find(id: &str) -> Result<Box<dyn Agent>> {
     let wanted = id.trim().to_ascii_lowercase();
-    all()
-        .into_iter()
-        .find(|a| a.info().id == wanted)
-        .ok_or_else(|| {
-            let known: Vec<&str> = all().iter().map(|a| a.info().id).collect();
-            anyhow::anyhow!("unknown agent {id:?}; known agents: {}", known.join(", "))
-        })
+    all().into_iter().find(|a| a.info().id == wanted).ok_or_else(|| {
+        let known: Vec<&str> = all().iter().map(|a| a.info().id).collect();
+        anyhow::anyhow!("unknown agent {id:?}; known agents: {}", known.join(", "))
+    })
 }
 
 #[cfg(test)]

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="ConfAI mark">
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8574c"/>
+      <stop offset="1" stop-color="#b8352d"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#171514"/>
+  <rect x="1" y="1" width="510" height="510" rx="111" fill="none" stroke="#3a2422" stroke-width="2"/>
+
+  <g transform="translate(256 256)">
+    <path d="M0-150 150 0 0 150-150 0Z" fill="url(#ember)"/>
+    <path d="M0-150 150 0 0 150-150 0Z" fill="none" stroke="#f4a49b" stroke-width="4" opacity="0.5"/>
+    <!-- The seam: three configs, one edit point. -->
+    <path d="M0-150 0 150" stroke="#171514" stroke-width="13"/>
+    <path d="M-80 -54 H-24" stroke="#171514" stroke-width="13" stroke-linecap="round"/>
+    <path d="M-96 0 H-24" stroke="#171514" stroke-width="13" stroke-linecap="round"/>
+    <path d="M-80 54 H-24" stroke="#171514" stroke-width="13" stroke-linecap="round"/>
+    <circle cx="0" cy="0" r="30" fill="#171514"/>
+    <circle cx="0" cy="0" r="14" fill="#f4a49b"/>
+  </g>
+</svg>

@@ -155,9 +155,7 @@ struct Cost {
 }
 
 pub fn cache_path() -> Result<PathBuf> {
-    let dir = dirs::cache_dir()
-        .or_else(dirs::home_dir)
-        .context("locating a cache directory")?;
+    let dir = dirs::cache_dir().or_else(dirs::home_dir).context("locating a cache directory")?;
     Ok(dir.join("confai").join("models.dev.json"))
 }
 

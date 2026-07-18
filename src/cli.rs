@@ -253,10 +253,16 @@ mod tests {
     #[test]
     fn provider_add_collects_repeated_set_flags() {
         let cli = Cli::try_parse_from([
-            "confai", "provider", "add", "byesu",
-            "--base-url", "https://byesu.com/v1",
-            "--set", "requires_openai_auth=true",
-            "--set", "supports_websockets=false",
+            "confai",
+            "provider",
+            "add",
+            "byesu",
+            "--base-url",
+            "https://byesu.com/v1",
+            "--set",
+            "requires_openai_auth=true",
+            "--set",
+            "supports_websockets=false",
             "--use",
         ])
         .unwrap();

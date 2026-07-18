@@ -1,10 +1,17 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="ConfAI — one editor for every AI agent's config" width="640">
+  <img src="assets/logo.svg" alt="ConfAI — one editor for every AI agent's config" width="720">
+</p>
+
+<p align="center">
+  <a href="https://github.com/redstone-md/ConfAI/actions/workflows/ci.yml"><img src="https://github.com/redstone-md/ConfAI/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/rust-1.82%2B-b8352d" alt="Rust 1.82+">
+  <img src="https://img.shields.io/badge/licence-MIT-b8352d" alt="MIT">
 </p>
 
 <p align="center">
   <a href="https://redstone.md">redstone.md</a> ·
   <a href="https://github.com/redstone-md/ConfAI">source</a> ·
+  <a href="CONTRIBUTING.md">contributing</a> ·
   <a href="LICENSE">MIT</a>
 </p>
 
@@ -56,6 +63,25 @@ read commands cover everything and write commands ask you to pick.
 
 `confai` with no arguments opens a two-pane browser: agents on the left, that
 agent's endpoints on the right.
+
+<!-- Screenshots go here once captured; see assets/screenshots/README.md.
+<p align="center">
+  <img src="assets/screenshots/tui.png" alt="The ConfAI interactive view: agents on the left, endpoints on the right" width="900">
+</p>
+<p align="center">
+  <img src="assets/screenshots/palette.png" alt="The command palette, listing every action with its key binding" width="900">
+</p>
+-->
+
+```
+╭ agents 3 ──────────────────╮╭ Codex · providers 3 ─────────────────────────────╮
+│   agent              prv   ││   id        host              key       wire  mdl │
+│▌◆ Codex              3   ● ││▌◆ primary   192.0.2.10:8080   sk-e…0001 respo… —  │
+│   Claude Code        1   ● ││   backup    backup.example    tok-…0002 respo… —  │
+│   opencode          11   ● ││   byesu     byesu.com         —         chat   29 │
+╰────────────────────────────╯╰──────────────────────────────────────────────────╯
+ ↑↓ move · enter detail · / filter · u use · a add · e edit · c check · s sync
+```
 
 | key | |
 |---|---|

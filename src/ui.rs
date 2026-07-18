@@ -6,9 +6,8 @@ use std::sync::OnceLock;
 /// ANSI styling, suppressed when stdout is redirected or `NO_COLOR` is set.
 pub fn colored() -> bool {
     static COLORED: OnceLock<bool> = OnceLock::new();
-    *COLORED.get_or_init(|| {
-        std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
-    })
+    *COLORED
+        .get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal())
 }
 
 macro_rules! style {
@@ -94,10 +93,7 @@ impl Table {
     }
 
     pub fn render(&self) -> String {
-        let columns = self
-            .headers
-            .len()
-            .max(self.rows.iter().map(Vec::len).max().unwrap_or(0));
+        let columns = self.headers.len().max(self.rows.iter().map(Vec::len).max().unwrap_or(0));
         let mut widths = vec![0usize; columns];
         for cells in std::iter::once(&self.headers).chain(&self.rows) {
             for (index, cell) in cells.iter().take(columns).enumerate() {

@@ -33,7 +33,9 @@ impl Probe {
                 self.models.len(),
                 if self.models.len() == 1 { "" } else { "s" }
             ),
-            Some(401) | Some(403) => format!("reachable but rejected the key (HTTP {})", self.status.unwrap()),
+            Some(401) | Some(403) => {
+                format!("reachable but rejected the key (HTTP {})", self.status.unwrap())
+            }
             Some(code) => format!("HTTP {code}"),
             None => "no response".to_string(),
         }
@@ -74,7 +76,12 @@ impl ModelsResponse {
 ///
 /// Never returns an error: an unreachable provider is a result to display, not
 /// a failure of the command the user asked for.
-pub fn probe(base_url: &str, api_key: Option<&str>, wire_api: Option<WireApi>, timeout: Duration) -> Probe {
+pub fn probe(
+    base_url: &str,
+    api_key: Option<&str>,
+    wire_api: Option<WireApi>,
+    timeout: Duration,
+) -> Probe {
     let url = models_url(base_url);
     let started = Instant::now();
 

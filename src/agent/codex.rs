@@ -260,7 +260,10 @@ multi_agent = true
 
         let out = cfg.render();
         assert!(out.contains(r#"base_url = "https://byesu.com/v1""#));
-        assert!(out.contains(r#"# base_url = "http://192.0.2.11:2455/v1""#), "lost the parked url:\n{out}");
+        assert!(
+            out.contains(r#"# base_url = "http://192.0.2.11:2455/v1""#),
+            "lost the parked url:\n{out}"
+        );
         assert!(out.contains(r#"# model_provider = "primary""#));
         assert!(out.contains("[features]"));
         // Unset fields on the patch must not wipe what is already there.

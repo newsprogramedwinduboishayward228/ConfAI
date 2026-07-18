@@ -558,7 +558,9 @@ impl Action {
             Action::Delete => app.ask_delete(),
             Action::Check => app.schedule(Job::Check, "checking…"),
             Action::CheckAll => app.schedule(Job::CheckAll, "checking every provider…"),
-            Action::Sync { prune: false } => app.schedule(Job::Sync { prune: false }, "syncing models…"),
+            Action::Sync { prune: false } => {
+                app.schedule(Job::Sync { prune: false }, "syncing models…")
+            }
             Action::Sync { prune: true } => {
                 app.schedule(Job::Sync { prune: true }, "syncing models, dropping stale…")
             }
@@ -578,9 +580,7 @@ impl Action {
     fn catalogue(app: &App) -> Vec<Action> {
         let mut actions: Vec<Action> = app
             .agent()
-            .map(|agent| {
-                agent.providers.iter().map(|p| Action::Use(Some(p.id.clone()))).collect()
-            })
+            .map(|agent| agent.providers.iter().map(|p| Action::Use(Some(p.id.clone()))).collect())
             .unwrap_or_default();
 
         // The bare forms of these only re-open what the palette already lists.
@@ -718,11 +718,7 @@ impl Form {
     }
 
     fn value(&self, kind: FieldKind) -> &str {
-        self.fields
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, v)| v.as_str())
-            .unwrap_or_default()
+        self.fields.iter().find(|(k, _)| *k == kind).map(|(_, v)| v.as_str()).unwrap_or_default()
     }
 
     /// Enter on a field: cycle a choice, otherwise start text entry.
@@ -1747,20 +1743,20 @@ impl App {
             return;
         }
 
-        let logo: Vec<&str> = brand::logo_small_lines().collect();
-        let logo_width = logo.iter().map(|line| line.chars().count()).max().unwrap_or(0) as u16;
+        // The mark alone, not a drawn wordmark: box-drawing art mixes weights
+        // differently across terminals and fonts, and came out looking broken.
         let [logo_area, words, links] = Layout::horizontal([
-            Constraint::Length(logo_width + 2),
+            Constraint::Length(4),
             Constraint::Min(10),
-            Constraint::Length(brand::WEBSITE.chars().count() as u16 + 2),
+            Constraint::Length(brand::REPOSITORY_SHORT.chars().count() as u16 + 2),
         ])
         .areas(area);
 
         frame.render_widget(
-            Paragraph::new(
-                logo.iter().map(|line| Line::from(format!(" {line}"))).collect::<Vec<_>>(),
-            )
-            .style(mark),
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {} ", brand::MARK),
+                mark.add_modifier(Modifier::BOLD),
+            ))),
             logo_area,
         );
 
@@ -1774,7 +1770,7 @@ impl App {
             Paragraph::new(vec![
                 Line::from(Span::styled(format!("v{}", brand::VERSION), muted)),
                 Line::from(Span::styled(brand::VENDOR, faint)),
-                Line::from(Span::styled(brand::WEBSITE, faint)),
+                Line::from(Span::styled(brand::REPOSITORY_SHORT, faint)),
             ])
             .alignment(Alignment::Right),
             links,
@@ -1783,9 +1779,9 @@ impl App {
 
     /// Draw the hint bar, returning where each clickable hint landed.
     fn render_hints(&self, frame: &mut Frame, area: Rect) -> Vec<(Rect, Action)> {
-        let vendor_width = brand::VENDOR.chars().count() as u16 + 2;
-        let [keys, vendor] =
-            Layout::horizontal([Constraint::Min(10), Constraint::Length(vendor_width)]).areas(area);
+        // The header already carries the vendor and the repository; repeating
+        // the vendor down here only crowded the keys off the end of the bar.
+        let keys = area;
 
         let mut spans = vec![Span::raw(" ")];
         let mut boxes = Vec::new();
@@ -1809,19 +1805,14 @@ impl App {
                 boxes.push((Rect { x, y: keys.y, width, height: 1 }, action));
             }
             spans.push(Span::styled(hint.key, Style::default().fg(palette::ACCENT)));
-            spans.push(Span::styled(format!(" {}", hint.label), Style::default().fg(palette::MUTED)));
+            spans.push(Span::styled(
+                format!(" {}", hint.label),
+                Style::default().fg(palette::MUTED),
+            ));
             x += width;
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), keys);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("{} ", brand::VENDOR),
-                Style::default().fg(palette::FAINT),
-            )))
-            .alignment(Alignment::Right),
-            vendor,
-        );
         boxes
     }
 
@@ -1864,12 +1855,9 @@ impl App {
             None => {
                 let mut hints = vec![Hint::plain("↑↓", "move")];
                 hints.extend(match self.focus {
-                    Pane::Agents => Hint::bar([
-                        Action::Palette,
-                        Action::Reload,
-                        Action::Help,
-                        Action::Quit,
-                    ]),
+                    Pane::Agents => {
+                        Hint::bar([Action::Palette, Action::Reload, Action::Help, Action::Quit])
+                    }
                     Pane::Providers => Hint::bar([
                         Action::Detail,
                         Action::Filter,
@@ -2022,8 +2010,11 @@ impl App {
                 let (health_text, health_style) = match self.health.get(&agent.id, &provider.id) {
                     Some(health) => (
                         format!("{DOT_FILLED} {}ms", health.millis),
-                        Style::default()
-                            .fg(if health.alive { palette::GOOD } else { palette::BAD }),
+                        Style::default().fg(if health.alive {
+                            palette::GOOD
+                        } else {
+                            palette::BAD
+                        }),
                     ),
                     None => (DOT_HOLLOW.to_string(), Style::default().fg(palette::FAINT)),
                 };
@@ -2095,7 +2086,8 @@ impl App {
                 Span::styled(model.label().to_string(), Style::default().fg(palette::TEXT)),
             ];
             if let Some(limits) = limits {
-                spans.push(Span::styled(format!("  {limits}"), Style::default().fg(palette::MUTED)));
+                spans
+                    .push(Span::styled(format!("  {limits}"), Style::default().fg(palette::MUTED)));
             }
             if let Some(price) = facts.and_then(catalog::Facts::price) {
                 spans.push(Span::styled(format!("  {price}"), Style::default().fg(palette::FAINT)));
@@ -2115,7 +2107,8 @@ impl App {
         dim_behind(frame);
 
         let screen = frame.area();
-        let height = (palette.matches.len() as u16 + 4).clamp(5, screen.height.saturating_sub(4).max(5));
+        let height =
+            (palette.matches.len() as u16 + 4).clamp(5, screen.height.saturating_sub(4).max(5));
         let area = centered_fixed(screen, 76, height);
         let inner = overlay_frame(frame, area, "commands");
 
@@ -2246,7 +2239,10 @@ fn render_about(frame: &mut Frame, scroll: u16) -> Rect {
     let key_width = rows.iter().map(|(key, _)| key.chars().count()).max().unwrap_or(0);
     for (key, what) in rows {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {}", fit(&key, key_width)), Style::default().fg(palette::ACCENT)),
+            Span::styled(
+                format!("  {}", fit(&key, key_width)),
+                Style::default().fg(palette::ACCENT),
+            ),
             Span::styled(format!("   {what}"), Style::default().fg(palette::MUTED)),
         ]));
     }
@@ -2457,7 +2453,14 @@ struct ListPane {
 
 impl ListPane {
     fn notice(title: &str, focused: bool, empty: Vec<String>) -> Self {
-        Self { title: title.to_string(), focused, header: None, rows: Vec::new(), selected: 0, empty }
+        Self {
+            title: title.to_string(),
+            focused,
+            header: None,
+            rows: Vec::new(),
+            selected: 0,
+            empty,
+        }
     }
 
     fn render(self, frame: &mut Frame, area: Rect) -> RowsAt {
@@ -2708,10 +2711,11 @@ mod render_tests {
     /// Render one frame and return it as text, so a failure shows the screen.
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
-        terminal.draw(|frame| {
-            app.render(frame);
-        })
-        .expect("draw");
+        terminal
+            .draw(|frame| {
+                app.render(frame);
+            })
+            .expect("draw");
 
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)
@@ -2762,16 +2766,18 @@ mod render_tests {
             let text = screen(&mut scene(), width, 24);
             let hints = text.lines().last().expect("no hint bar");
 
-            // The vendor mark is pinned right, so a hint running into it is the
-            // symptom of a sliced hint.
-            let keys = hints.rsplit_once(brand::VENDOR).map(|(keys, _)| keys).unwrap_or(hints);
             assert!(
-                !keys.trim_end().ends_with('·'),
+                !hints.trim_end().ends_with('·'),
                 "hint bar ends on a dangling separator at {width} columns: {hints:?}"
             );
             assert!(
-                keys.chars().count() + brand::VENDOR.chars().count() <= width as usize + 1,
+                hints.chars().count() <= width as usize,
                 "hint bar overflows at {width} columns: {hints:?}"
+            );
+            // A key sliced in half would leave its label orphaned or truncated.
+            assert!(
+                !hints.ends_with('…') && !hints.ends_with(' '),
+                "hint bar looks cut at {width} columns: {hints:?}"
             );
         }
     }
@@ -3030,7 +3036,10 @@ mod tests {
 
     #[test]
     fn subsequence_matching_ignores_case() {
-        assert_eq!(subsequence_score("Use Primary", "upy"), subsequence_score("use primary", "UPY"));
+        assert_eq!(
+            subsequence_score("Use Primary", "upy"),
+            subsequence_score("use primary", "UPY")
+        );
         assert!(subsequence_score("QUIT", "qt").is_some());
     }
 
@@ -3224,4 +3233,3 @@ mod tests {
         assert!(inside.y + inside.height <= screen.height);
     }
 }
-

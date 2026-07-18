@@ -90,11 +90,7 @@ impl AuthStore {
         if self.method(provider_id)? != Method::Api {
             return None;
         }
-        self.entries
-            .get(provider_id)?
-            .get("key")?
-            .as_str()
-            .map(str::to_owned)
+        self.entries.get(provider_id)?.get("key")?.as_str().map(str::to_owned)
     }
 
     /// Store `key` for `provider_id`.
@@ -118,8 +114,7 @@ impl AuthStore {
                 entry.insert("key".into(), json!(key));
             }
             None => {
-                self.entries
-                    .insert(provider_id.to_string(), json!({ "type": "api", "key": key }));
+                self.entries.insert(provider_id.to_string(), json!({ "type": "api", "key": key }));
             }
         }
         self.dirty = true;
@@ -143,8 +138,7 @@ impl AuthStore {
             return Ok(());
         }
         let value = Value::Object(self.entries.clone());
-        json::write(&self.path, &value)
-            .with_context(|| format!("writing {}", self.path.display()))
+        json::write(&self.path, &value).with_context(|| format!("writing {}", self.path.display()))
     }
 }
 
@@ -153,10 +147,9 @@ impl AuthStore {
 pub fn auth_path() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_DATA_HOME") {
         Some(explicit) => PathBuf::from(explicit),
-        None => dirs::home_dir()
-            .context("locating the home directory")?
-            .join(".local")
-            .join("share"),
+        None => {
+            dirs::home_dir().context("locating the home directory")?.join(".local").join("share")
+        }
     };
     Ok(base.join("opencode").join("auth.json"))
 }

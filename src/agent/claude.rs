@@ -223,7 +223,10 @@ mod tests {
         cfg.set_active_provider("keyless").unwrap();
 
         assert_eq!(cfg.root["env"][ENV_BASE_URL], j!("https://keyless"));
-        assert!(cfg.root["env"].get(ENV_AUTH_TOKEN).is_none(), "kept a token from another endpoint");
+        assert!(
+            cfg.root["env"].get(ENV_AUTH_TOKEN).is_none(),
+            "kept a token from another endpoint"
+        );
     }
 
     #[test]

@@ -10,6 +10,8 @@ pub const TAGLINE: &str = "one editor for every AI agent's config";
 pub const VENDOR: &str = "redstone.md";
 pub const WEBSITE: &str = "https://redstone.md";
 pub const REPOSITORY: &str = "https://github.com/redstone-md/ConfAI";
+/// The repository without its scheme, for places that are tight on width.
+pub const REPOSITORY_SHORT: &str = "github.com/redstone-md/ConfAI";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The diamond is the mark; it stands in for the full logo wherever one line is
@@ -25,19 +27,9 @@ pub const LOGO: &str = r"
 ╚██████╗╚██████╔╝██║ ╚████║██║     ██║  ██║██║
  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝  ╚═╝╚═╝";
 
-/// Compact wordmark for headers, where six rows would crowd out the content.
-pub const LOGO_SMALL: &str = r"
-╔═╗┌─┐┌┐┌┌─┐╔═╗╦
-║  │ ││││├┤ ╠═╣║
-╚═╝└─┘┘└┘└  ╩ ╩╩";
-
 /// Rows of [`LOGO`], without the leading blank line the raw literal carries.
 pub fn logo_lines() -> impl Iterator<Item = &'static str> {
     LOGO.trim_matches('\n').lines()
-}
-
-pub fn logo_small_lines() -> impl Iterator<Item = &'static str> {
-    LOGO_SMALL.trim_matches('\n').lines()
 }
 
 /// Widest row of [`LOGO`], for centring it without measuring at every call site.
@@ -85,21 +77,18 @@ mod tests {
     fn the_wordmark_is_a_rectangle() {
         let widths: Vec<usize> = logo_lines().map(|line| line.chars().count()).collect();
         assert_eq!(widths.len(), 6);
-        assert!(
-            widths.windows(2).all(|pair| pair[0] == pair[1]),
-            "ragged logo rows: {widths:?}"
-        );
+        assert!(widths.windows(2).all(|pair| pair[0] == pair[1]), "ragged logo rows: {widths:?}");
         assert_eq!(logo_width(), widths[0]);
     }
 
     #[test]
-    fn the_compact_wordmark_is_a_rectangle() {
-        let widths: Vec<usize> = logo_small_lines().map(|line| line.chars().count()).collect();
-        assert_eq!(widths.len(), 3);
-        assert!(
-            widths.windows(2).all(|pair| pair[0] == pair[1]),
-            "ragged compact logo rows: {widths:?}"
-        );
+    fn the_wordmark_uses_one_family_of_box_characters() {
+        // Mixing single-line and double-line box drawing renders at two
+        // different weights, which is what made the old compact mark look
+        // broken. Block and double-line only.
+        let stray: Vec<char> =
+            LOGO.chars().filter(|c| matches!(c, '\u{2500}'..='\u{253F}')).collect();
+        assert!(stray.is_empty(), "single-line box characters in the wordmark: {stray:?}");
     }
 
     #[test]
@@ -107,6 +96,11 @@ mod tests {
         for link in [WEBSITE, REPOSITORY] {
             assert!(link.starts_with("https://"), "{link} is not an absolute URL");
         }
+    }
+
+    #[test]
+    fn the_short_repository_is_the_same_link_without_its_scheme() {
+        assert_eq!(REPOSITORY, format!("https://{REPOSITORY_SHORT}"));
     }
 
     #[test]

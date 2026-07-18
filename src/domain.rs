@@ -145,7 +145,8 @@ pub fn mask(secret: &str) -> String {
         return "*".repeat(secret.chars().count().max(3));
     }
     let head: String = secret.chars().take(visible).collect();
-    let tail: String = secret.chars().rev().take(visible).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String =
+        secret.chars().rev().take(visible).collect::<Vec<_>>().into_iter().rev().collect();
     format!("{head}…{tail}")
 }
 
