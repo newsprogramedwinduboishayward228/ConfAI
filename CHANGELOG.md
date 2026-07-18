@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-07-18
+## [0.0.1] - 2026-07-18
 
-Initial release.
+First tagged build. Everything below works and is covered by tests, but the
+version says what it means: the interfaces are still free to move.
 
 ### Added
 
@@ -47,5 +48,5 @@ Initial release.
 - `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG` and `XDG_CONFIG_HOME` are
   honoured, matching the agents' own behaviour.
 
-[Unreleased]: https://github.com/redstone-md/ConfAI/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/redstone-md/ConfAI/releases/tag/v0.1.0
+[Unreleased]: https://github.com/redstone-md/ConfAI/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/redstone-md/ConfAI/releases/tag/v0.0.1
