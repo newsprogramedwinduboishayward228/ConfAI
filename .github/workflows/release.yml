@@ -5,30 +5,96 @@ on:
     tags:
       - "v*"
 
+# Read-only by default; only the jobs that publish ask for more.
 permissions:
-  contents: write
+  contents: read
+
+# Two tags pushed close together must not interleave. Never cancel a release
+# that is already running: a half-published release is worse than a queued one.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
+  # Nothing else starts until the tag and Cargo.toml agree. Finding out after
+  # eight builds that the tag was wrong costs twenty minutes and a deleted tag.
+  verify:
+    name: verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          crate_version=$(awk -F' *= *' '
+            /^\[/ { section = $0 }
+            section == "[package]" && $1 == "version" { gsub(/"/, "", $2); print $2; exit }
+          ' Cargo.toml)
+
+          if [ -z "$crate_version" ]; then
+            echo "::error::could not read version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::tag $tag is v$tag_version but Cargo.toml says $crate_version"
+            exit 1
+          fi
+
+          case "$tag_version" in
+            *-alpha*|*-beta*|*-rc*) prerelease=true ;;
+            *)                      prerelease=false ;;
+          esac
+
+          echo "version=$crate_version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Releasing $crate_version (prerelease: $prerelease)"
+
   build:
     name: ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
+      # Every target is reported, but `needs` below still stops the publish if
+      # any of them failed, so a partial set can never reach a release.
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
-          - target: aarch64-apple-darwin
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
-          - target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
     steps:
@@ -40,61 +106,245 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
 
+      - uses: taiki-e/install-action@v2
+        if: matrix.cross
+        with:
+          tool: cross
+
+      # musl already defaults to static linking, but saying so explicitly means
+      # a future default change cannot quietly produce a dynamic musl binary.
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static' || '' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --locked --release --target ${{ matrix.target }}
+          else
+            cargo build --locked --release --target ${{ matrix.target }}
+          fi
 
-      # The archive name carries the tag, so a downloaded file still says which
-      # release it came from once it is out of the browser's download list.
-      - name: Package (unix)
-        if: matrix.archive == 'tar.gz'
+      # aarch64 musl cannot be executed here, so inspect the ELF rather than
+      # running it. Rust emits static-pie for musl; anything "dynamically
+      # linked" means the static guarantee broke.
+      - name: Check musl binary is static
+        if: contains(matrix.target, 'musl')
         shell: bash
         run: |
-          name="confai-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/confai" "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
-          tar -czf "dist/$name.tar.gz" -C dist "$name"
-          rm -rf "dist/$name"
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/confai"
+          file "$bin"
+          if file "$bin" | grep -q "dynamically linked"; then
+            echo "::error::${{ matrix.target }} produced a dynamically linked binary"
+            exit 1
+          fi
+          if command -v ldd >/dev/null && ldd "$bin" 2>&1 | grep -qv "not a dynamic executable"; then
+            ldd "$bin" || true
+          fi
 
-      - name: Package (windows)
-        if: matrix.archive == 'zip'
+      # The archive carries the version, and the directory inside it carries the
+      # same name, so an extracted tree says where it came from and
+      # `cargo binstall` can find the binary by a predictable path.
+      - name: Package
         shell: bash
         run: |
-          name="confai-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          set -euo pipefail
+          name="confai-${{ needs.verify.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/confai.exe" "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
-          (cd dist && 7z a "$name.zip" "$name" >/dev/null)
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "target/${{ matrix.target }}/release/confai.exe" "dist/$name/"
+          else
+            cp "target/${{ matrix.target }}/release/confai" "dist/$name/"
+          fi
+          cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          else
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+          fi
           rm -rf "dist/$name"
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: confai-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 7
 
-  release:
-    name: publish
-    needs: build
+  publish:
+    name: publish release
+    needs: [verify, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      # git-cliff walks tags, so the full history has to be here.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: confai-*
           merge-multiple: true
 
-      # One checksum file for the whole release, with plain file names, so
-      # `sha256sum -c` works in the directory the archives were downloaded into.
+      # A missing archive here means an upload silently produced nothing.
+      - name: Check every target arrived
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          echo "found $count archives"
+          find dist -maxdepth 1 -type f | sort
+          if [ "$count" -ne 8 ]; then
+            echo "::error::expected 8 archives, found $count"
+            exit 1
+          fi
+
+      # Plain file names, so `sha256sum -c SHA256SUMS` works in the directory
+      # the archives were downloaded into. The installers parse this file.
       - name: Checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum confai-*.tar.gz confai-*.zip > SHA256SUMS
           cat SHA256SUMS
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      # `--current` is the tag being released. If HEAD somehow is not the tagged
+      # commit, fall back to the newest tag rather than shipping empty notes.
+      - name: Release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cliff --config cliff.toml --current --strip header --output RELEASE_NOTES.md \
+            || git cliff --config cliff.toml --latest --strip header --output RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
-          generate_release_notes: true
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ needs.verify.outputs.prerelease == 'true' }}
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/confai-*.tar.gz
+            dist/confai-*.zip
+            dist/SHA256SUMS
+            install.sh
+            install.ps1
+
+  # Regenerating the changelog after the release means the tagged tree and the
+  # published notes are produced from the same commits by the same config.
+  changelog:
+    name: update CHANGELOG.md
+    needs: [verify, publish]
+    if: needs.verify.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      # Insert rather than regenerate. A full rebuild would rewrite entries that
+      # were written by hand, and the generated text for an early release
+      # describes the commits that built the tool rather than what the tool does.
+      - name: Insert the new section
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify.outputs.version }}"
+
+          if grep -qF "## [${version}]" CHANGELOG.md; then
+            echo "CHANGELOG.md already documents ${version}"
+            exit 0
+          fi
+
+          git cliff --config cliff.toml --current --strip header --output SECTION.md \
+            || git cliff --config cliff.toml --latest --strip header --output SECTION.md
+
+          if [ ! -s SECTION.md ]; then
+            echo "git-cliff produced nothing for ${version}"
+            exit 1
+          fi
+
+          # Everything goes directly below the Unreleased marker, so older
+          # entries are never touched.
+          awk '
+            /^## \[Unreleased\]/ && !done {
+              print
+              print ""
+              while ((getline line < "SECTION.md") > 0) print line
+              done = 1
+              next
+            }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.next
+          mv CHANGELOG.next CHANGELOG.md
+          rm -f SECTION.md
+
+      - name: Commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): regenerate for ${{ github.ref_name }}"
+          git push origin HEAD:main
+
+  # crates.io needs a token this repository may not have. Rather than failing
+  # every release until one exists, the step is skipped and says so.
+  crates-io:
+    name: publish to crates.io
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: crates-io
+
+      # `secrets` is not available in a job- or step-level `if`, so the presence
+      # of the token becomes a step output first.
+      - id: token
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CARGO_REGISTRY_TOKEN is not set; skipping the crates.io publish"
+          fi
+
+      - name: Publish
+        if: steps.token.outputs.present == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked

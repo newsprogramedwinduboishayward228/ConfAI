@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/redstone-md/ConfAI/actions/workflows/ci.yml"><img src="https://github.com/redstone-md/ConfAI/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/rust-1.82%2B-b8352d" alt="Rust 1.82+">
+  <img src="https://img.shields.io/badge/rust-1.88%2B-b8352d" alt="Rust 1.88+">
   <img src="https://img.shields.io/badge/licence-MIT-b8352d" alt="MIT">
 </p>
 

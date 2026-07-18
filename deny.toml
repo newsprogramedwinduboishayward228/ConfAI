@@ -1,0 +1,77 @@
+# cargo-deny configuration. Run locally with `cargo deny check`.
+#
+# The point of this file is that a dependency cannot arrive with an unknown
+# licence, an open advisory or a mystery source without someone noticing.
+
+[graph]
+# Every target the release workflow ships, so a dependency that is only pulled
+# in on Windows or musl is checked too.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
+all-features = true
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+# "workspace" limits unmaintained warnings to crates this project depends on
+# directly. Transitive unmaintained advisories are real, but they land without
+# warning and there is usually nothing to do about them the same day.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# High confidence, because a licence guessed from prose is not a licence.
+confidence-threshold = 0.93
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  # `option-ext`, reached through `dirs`, is MPL-2.0. File-level copyleft on a
+  # dependency that is not modified here.
+  "MPL-2.0",
+]
+exceptions = [
+  # `webpki-roots` is Mozilla's CA root store, and CDLA-Permissive-2.0 is a data
+  # licence rather than a code one. Permissive, but narrow enough that it is
+  # granted to this one crate instead of allowed across the graph.
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
+
+[bans]
+# A duplicate version is worth knowing about but is not usually the maintainer's
+# to fix, so it reports rather than fails.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+  # The TLS story is rustls all the way down; anything pulling in a system
+  # OpenSSL would break the static musl builds.
+  { crate = "openssl", use-instead = "rustls" },
+  { crate = "openssl-sys", use-instead = "rustls" },
+  { crate = "native-tls", use-instead = "rustls" },
+]
+skip = []
+skip-tree = [
+  { crate = "windows-sys", reason = "foundational, and versions churn faster than any consumer can converge" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

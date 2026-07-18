@@ -2,15 +2,16 @@
 name = "confai"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.82"
+# Set by ratatui, which declares 1.88.0; the rest of the tree needs 1.85 at most.
+rust-version = "1.88"
 description = "Fast CLI to inspect and edit the config of every AI coding agent installed on your machine"
 authors = ["redstone.md <https://redstone.md>"]
 repository = "https://github.com/redstone-md/ConfAI"
 homepage = "https://redstone.md"
 license = "MIT"
 readme = "README.md"
-# Banners and screenshots are for the repository, not for the crate tarball.
-exclude = ["assets/", ".github/"]
+# Repository furniture, not crate contents.
+exclude = ["assets/", ".github/", "cliff.toml", "deny.toml", "install.sh", "install.ps1"]
 keywords = ["cli", "config", "ai", "agent", "tui"]
 categories = ["command-line-utilities", "config"]
 
@@ -26,6 +27,19 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 toml_edit = { version = "0.25", features = ["serde"] }
 ureq = { version = "3.3", default-features = false, features = ["rustls", "json", "gzip"] }
 which = "8.0"
+
+# Mirrors what .github/workflows/release.yml actually uploads, so `cargo binstall`
+# fetches a release archive instead of compiling from source.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.{ archive-format }"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [profile.release]
 opt-level = 3

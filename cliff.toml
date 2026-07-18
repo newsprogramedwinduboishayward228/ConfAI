@@ -1,0 +1,108 @@
+# git-cliff configuration for ConfAI.
+#
+# One config drives two outputs:
+#   * `git cliff --output CHANGELOG.md`  — the whole history, with the header.
+#   * `git cliff --current --strip header` — the body for one release's notes.
+#
+# Group names carry an HTML-comment sort prefix so Tera's `group_by` orders the
+# sections deliberately instead of alphabetically; `striptags` removes the
+# prefix before the heading is printed.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+"""
+
+body = """
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}](https://github.com/redstone-md/ConfAI/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## Unreleased
+{% endif -%}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.breaking %}**Breaking:** {% endif -%}
+{% if commit.scope %}**{{ commit.scope }}:** {% endif -%}
+{{ commit.message | split(pat="\n") | first | trim | upper_first }} \
+([`{{ commit.id | truncate(length=7, end="") }}`](https://github.com/redstone-md/ConfAI/commit/{{ commit.id }}))
+{%- endfor %}
+{% endfor %}
+
+{%- if version %}
+{% if previous and previous.version %}
+Full changelog: [{{ previous.version }}...{{ version }}](https://github.com/redstone-md/ConfAI/compare/{{ previous.version }}...{{ version }})
+{%- else %}
+Full changelog: [all commits up to {{ version }}](https://github.com/redstone-md/ConfAI/commits/{{ version }})
+{%- endif %}
+{%- endif %}
+
+"""
+
+footer = ""
+
+# `trim` would eat the trailing newline that separates one release section from
+# the next, so whitespace is controlled with `{%-` / `-%}` in the template
+# instead. The blank line above the closing quotes is the release separator.
+trim = false
+
+postprocessors = [
+  # Collapse the blank lines the loops leave behind.
+  { pattern = '\n{3,}', replace = "\n\n" },
+]
+
+[git]
+conventional_commits = true
+# Keep unconventional commits rather than dropping them silently; they land in
+# "Other" so nothing disappears from the record.
+filter_unconventional = false
+filter_commits = false
+protect_breaking_commits = true
+split_commits = false
+topo_order = false
+sort_commits = "newest"
+tag_pattern = "v[0-9]*"
+
+commit_preprocessors = [
+  # `feat: thing (#12)` and `fix: thing, closes #12` both become links. GitHub
+  # redirects /issues/N to the pull request when N is a PR, so one form covers
+  # both without needing an API token at generation time.
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/redstone-md/ConfAI/issues/${1}))" },
+  { pattern = '(^|\s)#([0-9]+)\b', replace = "${1}[#${2}](https://github.com/redstone-md/ConfAI/issues/${2})" },
+  # Trailers never belong in a release note.
+  { pattern = '(?m)^\s*(Signed-off-by|Co-authored-by|Co-Authored-By):.*$', replace = "" },
+  { pattern = '[ \t]+$', replace = "" },
+]
+
+commit_parsers = [
+  # Noise. Merges, release chores and rebase leftovers say nothing to a reader.
+  { message = '^Merge (branch|pull request|remote-tracking|tag)', skip = true },
+  { message = '^(chore|ci|build)\(release\)', skip = true },
+  { message = '^chore: (release|bump|prepare|prepare for) ', skip = true },
+  { message = '^(chore|docs)\(changelog\)', skip = true },
+  { message = '^(wip|WIP)\b', skip = true },
+  { message = '^(fixup|squash)!', skip = true },
+  { message = '^Revert "(chore|ci|build)', skip = true },
+
+  # Dependency bumps are kept, but out of the headline sections. Matched before
+  # the type rules so `chore(deps)` never reaches "Other".
+  { message = '^(chore|build|ci|fix|deps)\(deps(-dev)?\)', group = "<!-- 6 -->Build & CI" },
+  { message = '^[Bb]ump .+ from .+ to ', group = "<!-- 6 -->Build & CI" },
+  { message = '^[Uu]pdate (Cargo\.lock|dependencies)', group = "<!-- 6 -->Build & CI" },
+
+  { message = '^feat', group = "<!-- 0 -->Features" },
+  { message = '^fix', group = "<!-- 1 -->Fixes" },
+  { message = '^perf', group = "<!-- 2 -->Performance" },
+  { message = '^docs', group = "<!-- 3 -->Documentation" },
+  { message = '^refactor', group = "<!-- 4 -->Refactor" },
+  { message = '^test', group = "<!-- 5 -->Testing" },
+  { message = '^(build|ci)', group = "<!-- 6 -->Build & CI" },
+  { message = '^(style|revert|chore)', group = "<!-- 7 -->Other" },
+  { message = '.*', group = "<!-- 7 -->Other" },
+]
