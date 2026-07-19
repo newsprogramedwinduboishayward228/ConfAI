@@ -8,7 +8,7 @@ Five ways in, in rough order of how much you have to think about them. Pick one.
 | Prebuilt, scripted (Windows) | `irm .../install.ps1 \| iex` | PowerShell 5.1+ |
 | Prebuilt, no script | Download an archive from the releases page | nothing |
 | Prebuilt, via cargo | `cargo binstall confai` | `cargo-binstall` |
-| From source | `cargo install confai` | Rust 1.88+ |
+| From source | `cargo install confai --locked` | Rust 1.88+ |
 
 ---
 
@@ -18,13 +18,16 @@ The route with no trust question attached: cargo builds the crate on your
 machine from the source published to crates.io.
 
 ```sh
-cargo install confai
+cargo install confai --locked
 ```
 
 This needs a Rust toolchain at or above the `rust-version` in `Cargo.toml`
 (1.88 at the time of writing) and takes a few minutes, since the release
 profile uses fat LTO. The binary lands in `~/.cargo/bin`, which cargo already
 puts on your PATH.
+
+The `--locked` flag builds against the dependency versions CI tested, rather
+than resolving fresh ones on your machine.
 
 Upgrade with the same command; add `--force` if cargo thinks the installed
 version is current.
@@ -65,8 +68,12 @@ know which libc you have, take musl.
 Each archive contains the binary, `README.md`, `LICENSE` and `CHANGELOG.md`, in
 a directory named after the archive.
 
+Resolve the newest tag rather than pasting a version, so this does not rot the
+next time a release goes out:
+
 ```sh
-version=0.0.1
+version=$(curl -fsSL https://api.github.com/repos/redstone-md/ConfAI/releases/latest \
+          | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
 target=x86_64-unknown-linux-musl
 base="https://github.com/redstone-md/ConfAI/releases/download/v$version"
 
@@ -85,7 +92,7 @@ On macOS, `shasum -a 256 -c SHA256SUMS --ignore-missing` does the same job.
 On Windows, from PowerShell:
 
 ```powershell
-$version = '0.0.1'
+$version = (Invoke-RestMethod https://api.github.com/repos/redstone-md/ConfAI/releases/latest).tag_name.TrimStart('v')
 $target  = 'x86_64-pc-windows-msvc'
 $base    = "https://github.com/redstone-md/ConfAI/releases/download/v$version"
 

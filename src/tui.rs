@@ -36,6 +36,7 @@ use crate::domain::{mask, Model, Provider, WireApi};
 use crate::mcp;
 use crate::net::{self, catalog};
 use crate::preset::{self, Preset};
+use crate::skill::{self, Skill};
 use crate::ui;
 
 pub fn run() -> Result<()> {
@@ -299,22 +300,44 @@ enum Lens {
     #[default]
     Providers,
     Mcp,
+    Skills,
 }
 
-impl Lens {
-    fn other(self) -> Self {
-        match self {
-            Lens::Providers => Lens::Mcp,
-            Lens::Mcp => Lens::Providers,
-        }
-    }
+/// The cycle order, which is also the order the help screen lists the lenses in.
+const LENSES: [Lens; 3] = [Lens::Providers, Lens::Mcp, Lens::Skills];
 
+impl Lens {
     fn label(self) -> &'static str {
         match self {
             Lens::Providers => "providers",
             Lens::Mcp => "mcp",
+            Lens::Skills => "skills",
         }
     }
+}
+
+/// Whether an agent with these facilities has anything to show under `lens`.
+///
+/// Providers are the one thing every agent has, so that lens is always live and
+/// the cycle can always land somewhere.
+fn lens_supported(lens: Lens, mcp: bool, skills: bool) -> bool {
+    match lens {
+        Lens::Providers => true,
+        Lens::Mcp => mcp,
+        Lens::Skills => skills,
+    }
+}
+
+/// The next lens in the cycle, skipping the ones this agent has no facility for.
+///
+/// Codex keeps no skills, so cycling on it goes providers → mcp → providers
+/// rather than stopping on a pane that could only ever be empty.
+fn next_lens(from: Lens, mcp: bool, skills: bool) -> Lens {
+    let at = LENSES.iter().position(|lens| *lens == from).unwrap_or(0);
+    (1..=LENSES.len())
+        .map(|step| LENSES[(at + step) % LENSES.len()])
+        .find(|lens| lens_supported(*lens, mcp, skills))
+        .unwrap_or(Lens::Providers)
 }
 
 /// A case-insensitive substring filter over the provider list.
@@ -359,6 +382,17 @@ impl Filter {
         let hit = |hay: &str| hay.to_lowercase().contains(&needle);
         hit(&server.name) || hit(server.transport.kind()) || hit(&server.transport.summary())
     }
+
+    /// The same idea over a skill: the directory the agent addresses it by, or
+    /// the description that says what it is for.
+    fn matches_skill(&self, skill: &Skill) -> bool {
+        let needle = self.query.trim().to_lowercase();
+        if needle.is_empty() {
+            return true;
+        }
+        let hit = |hay: &str| hay.to_lowercase().contains(&needle);
+        hit(&skill.directory) || skill.description.as_deref().is_some_and(hit)
+    }
 }
 
 /// One agent as it looked the last time it was read from disk.
@@ -373,6 +407,12 @@ struct AgentEntry {
     /// The model the agent is set to use, for agents that name one.
     model: Option<String>,
     mcp: Vec<mcp::Server>,
+    /// Where this agent keeps skills, for the agents that keep them at all.
+    ///
+    /// Skills are directories rather than config keys, so this comes off the
+    /// handle and survives a config that would not parse.
+    skills_dir: Option<PathBuf>,
+    skills: Vec<Skill>,
     /// Why the config could not be parsed, if it could not be.
     error: Option<String>,
 }
@@ -380,6 +420,10 @@ struct AgentEntry {
 impl AgentEntry {
     fn snapshot(handle: &dyn Agent) -> Self {
         let info = handle.info();
+        let skills_dir = handle.skills_dir();
+        // Read off disk rather than out of the config: a skill exists because a
+        // directory does, so an unparseable config still lists them.
+        let skills = skills_dir.as_deref().map(skill::read_dir).unwrap_or_default();
         let mut entry = Self {
             id: info.id.to_string(),
             name: info.name.to_string(),
@@ -390,6 +434,8 @@ impl AgentEntry {
             active: None,
             model: None,
             mcp: Vec::new(),
+            skills_dir,
+            skills,
             error: None,
         };
         match handle.load() {
@@ -456,6 +502,10 @@ enum Action {
     McpToggle,
     /// Apply a named MCP preset, or `None` to open the picker.
     McpPreset(Option<String>),
+    SkillDetail,
+    SkillDelete,
+    /// Copy the selected skill into another agent's skills directory.
+    SkillCopy,
     Reload,
     Palette,
     Help,
@@ -502,6 +552,14 @@ fn mcp_menu() -> Vec<Action> {
     ]
 }
 
+/// What the same keys mean while the pane is showing skills.
+///
+/// Shorter than the other two on purpose: a skill is a directory of Markdown,
+/// so there is nothing here to add or edit without being a text editor.
+fn skill_menu() -> Vec<Action> {
+    vec![Action::SkillDetail, Action::SkillCopy, Action::SkillDelete]
+}
+
 impl Action {
     fn label(&self) -> String {
         match self {
@@ -521,7 +579,7 @@ impl Action {
             Action::Preset(Some(id)) => format!("preset {id}"),
             Action::Preset(None) => "apply a preset".into(),
             Action::Lens(Some(lens)) => format!("show {}", lens.label()),
-            Action::Lens(None) => "switch between providers and mcp".into(),
+            Action::Lens(None) => "switch between providers, mcp and skills".into(),
             Action::McpDetail => "mcp server detail".into(),
             Action::McpAdd => "add mcp server".into(),
             Action::McpEdit => "edit mcp server".into(),
@@ -531,6 +589,9 @@ impl Action {
             Action::McpToggle => "enable or disable mcp server".into(),
             Action::McpPreset(Some(id)) => format!("mcp preset {id}"),
             Action::McpPreset(None) => "apply an mcp preset".into(),
+            Action::SkillDetail => "skill detail".into(),
+            Action::SkillDelete => "delete skill".into(),
+            Action::SkillCopy => "copy skill to another agent".into(),
             Action::Reload => "reload from disk".into(),
             Action::Palette => "command palette".into(),
             Action::Help => "help".into(),
@@ -554,7 +615,7 @@ impl Action {
             Action::Sync { prune: false } => "sync",
             Action::Sync { prune: true } => "sync+prune",
             Action::Preset(_) => "preset",
-            Action::Lens(_) => "providers/mcp",
+            Action::Lens(_) => "lens",
             Action::McpDetail => "detail",
             Action::McpAdd => "add",
             Action::McpEdit => "edit",
@@ -563,6 +624,9 @@ impl Action {
             Action::McpCheckAll => "check all",
             Action::McpToggle => "on/off",
             Action::McpPreset(_) => "preset",
+            Action::SkillDetail => "detail",
+            Action::SkillDelete => "del",
+            Action::SkillCopy => "copy",
             Action::Reload => "reload",
             Action::Palette => "commands",
             Action::Help => "help",
@@ -591,7 +655,9 @@ impl Action {
             Action::Lens(Some(lens)) => {
                 format!("show this agent's {} in the right pane", lens.label())
             }
-            Action::Lens(None) => "swap the right pane between providers and mcp servers".into(),
+            Action::Lens(None) => {
+                "cycle the right pane through providers, mcp servers and skills".into()
+            }
             Action::McpDetail => "show the full command, arguments and environment".into(),
             Action::McpAdd => "add an mcp server to this agent".into(),
             Action::McpEdit => "change this server's command, url or environment".into(),
@@ -601,6 +667,11 @@ impl Action {
             Action::McpToggle => "turn this mcp server on or off without deleting it".into(),
             Action::McpPreset(Some(_)) => "add this ready-made mcp server to the agent".into(),
             Action::McpPreset(None) => "choose a ready-made mcp server to add".into(),
+            Action::SkillDetail => "show the description, tools and any problem in full".into(),
+            Action::SkillDelete => {
+                "delete this skill's directory, which undo cannot restore".into()
+            }
+            Action::SkillCopy => "copy this skill into another agent's skills directory".into(),
             Action::Reload => "re-read every config from disk".into(),
             Action::Palette => "search every action by name".into(),
             Action::Help => "the about screen and the full key map".into(),
@@ -634,6 +705,9 @@ impl Action {
             Action::McpCheckAll => "C",
             Action::McpToggle => "u",
             Action::McpPreset(_) => "p",
+            Action::SkillDetail => "enter",
+            Action::SkillDelete => "d",
+            Action::SkillCopy => "y",
             Action::Reload => "r",
             Action::Palette => "ctrl+p or ctrl+k",
             Action::Help => "?",
@@ -653,6 +727,22 @@ impl Action {
             None => Some("no agent selected".to_string()),
             Some(agent) if !agent.capabilities.mcp => {
                 Some(format!("{} does not store MCP servers", agent.name))
+            }
+            Some(_) => None,
+        };
+        let no_skills = || match app.agent() {
+            None => Some("no agent selected".to_string()),
+            Some(agent) if agent.skills_dir.is_none() => {
+                Some(format!("{} does not keep skills", agent.name))
+            }
+            Some(_) => None,
+        };
+        let no_skill = || app.skill().is_none().then(|| "no skill selected".to_string());
+        // Cycling needs somewhere to cycle to, which is either of the other two.
+        let one_lens = || match app.agent() {
+            None => Some("no agent selected".to_string()),
+            Some(agent) if !agent.capabilities.mcp && agent.skills_dir.is_none() => {
+                Some(format!("{} has only providers to show", agent.name))
             }
             Some(_) => None,
         };
@@ -683,7 +773,11 @@ impl Action {
 
             // Every shipped agent stores MCP servers, but the capability is what
             // decides, not the fact that all three happen to today.
-            Action::Lens(_) | Action::McpAdd | Action::McpPreset(_) => no_mcp(),
+            Action::Lens(None) => one_lens(),
+            Action::Lens(Some(Lens::Providers)) => None,
+            Action::Lens(Some(Lens::Mcp)) => no_mcp(),
+            Action::Lens(Some(Lens::Skills)) => no_skills(),
+            Action::McpAdd | Action::McpPreset(_) => no_mcp(),
             Action::McpDetail
             | Action::McpEdit
             | Action::McpDelete
@@ -694,6 +788,10 @@ impl Action {
                     .is_none_or(|agent| agent.mcp.is_empty())
                     .then(|| "this agent has no mcp servers to check".to_string())
             }),
+
+            Action::SkillDetail | Action::SkillDelete | Action::SkillCopy => {
+                no_skills().or_else(no_skill)
+            }
         }
     }
 
@@ -726,10 +824,10 @@ impl Action {
             Action::Preset(None) => app.open_presets(),
 
             Action::Lens(target) => {
-                app.lens = target.unwrap_or_else(|| app.lens().other());
+                app.lens = target.unwrap_or_else(|| app.next_lens());
                 app.focus = Pane::Providers;
-                // The two lists have separate cursors, so neither loses its place
-                // when you look at the other one.
+                // The three lists have separate cursors, so none loses its place
+                // when you look at another one.
                 app.filter.clear();
             }
             Action::McpDetail => app.open_mcp_detail(),
@@ -744,6 +842,10 @@ impl Action {
             Action::McpToggle => app.toggle_mcp(),
             Action::McpPreset(Some(id)) => app.apply_mcp_preset_by_id(&id),
             Action::McpPreset(None) => app.open_mcp_presets(),
+
+            Action::SkillDetail => app.open_skill_detail(),
+            Action::SkillDelete => app.ask_delete_skill(),
+            Action::SkillCopy => app.open_skill_copy(),
 
             Action::Reload => {
                 app.reload();
@@ -769,12 +871,12 @@ impl Action {
                 Action::Use(None) | Action::Preset(None) | Action::Palette | Action::Lens(None)
             )
         }));
-        // Named rather than toggled, so searching "mcp" finds the way in.
-        actions.push(Action::Lens(Some(Lens::Providers)));
-        actions.push(Action::Lens(Some(Lens::Mcp)));
+        // Named rather than cycled, so searching "mcp" or "skills" finds the way in.
+        actions.extend(LENSES.iter().map(|lens| Action::Lens(Some(*lens))));
         actions.extend(
             mcp_menu().into_iter().filter(|action| !matches!(action, Action::McpPreset(None))),
         );
+        actions.extend(skill_menu());
 
         actions.extend(
             preset::all()
@@ -1097,14 +1199,39 @@ fn optional(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// What a confirmed y/n question will actually do.
+///
+/// Deliberately not [`Subject`]: a form only ever edits a provider or a server,
+/// while a confirm also covers directories on disk that no config knows about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pending {
+    DeleteProvider,
+    DeleteMcp,
+    DeleteSkill,
+    /// Replace a same-named skill already installed under `target_agent`.
+    OverwriteSkill {
+        target_agent: String,
+    },
+}
+
+impl Pending {
+    /// The word on the `y` key, since not every confirm is a deletion.
+    fn verb(&self) -> &'static str {
+        match self {
+            Pending::OverwriteSkill { .. } => "overwrite",
+            _ => "delete",
+        }
+    }
+}
+
 /// A pending y/n question about a destructive edit.
 #[derive(Debug, Clone)]
 struct Confirm {
     prompt: String,
     agent_id: String,
-    /// The provider or MCP server the answer applies to.
+    /// The provider, MCP server or skill directory the answer applies to.
     subject_id: String,
-    subject: Subject,
+    pending: Pending,
 }
 
 struct PresetPicker {
@@ -1114,6 +1241,23 @@ struct PresetPicker {
 
 struct McpPresetPicker {
     presets: Vec<preset::McpPreset>,
+    cursor: Cursor,
+}
+
+/// One agent a skill could be copied into.
+#[derive(Debug, Clone)]
+struct SkillTarget {
+    id: String,
+    name: String,
+    dir: PathBuf,
+}
+
+/// The other agents that keep skills, for copying the selected one across.
+struct SkillCopyPicker {
+    /// The directory name, which is what the copy will be called at the far end.
+    skill: String,
+    source: PathBuf,
+    targets: Vec<SkillTarget>,
     cursor: Cursor,
 }
 
@@ -1265,6 +1409,8 @@ enum Overlay {
     Models(ModelPicker),
     McpDetail { scroll: u16 },
     McpPresets(McpPresetPicker),
+    SkillDetail { scroll: u16 },
+    SkillCopy(SkillCopyPicker),
 }
 
 /// Work that must be visibly announced before it blocks the event loop.
@@ -1319,6 +1465,7 @@ struct App {
     /// The MCP list keeps its own place, so switching lens and back does not
     /// lose where you were.
     mcp_cursor: Cursor,
+    skill_cursor: Cursor,
     focus: Pane,
     /// What the right pane is set to show. Read it through [`App::lens`], which
     /// also honours whether the agent supports MCP at all.
@@ -1340,6 +1487,7 @@ impl App {
             agent_cursor: Cursor::default(),
             provider_cursor: Cursor::default(),
             mcp_cursor: Cursor::default(),
+            skill_cursor: Cursor::default(),
             focus: Pane::Agents,
             lens: Lens::default(),
             filter: Filter::default(),
@@ -1402,8 +1550,7 @@ impl App {
         self.agents =
             agent::all().iter().map(|handle| AgentEntry::snapshot(handle.as_ref())).collect();
         self.agent_cursor.clamp(self.agents.len());
-        self.provider_cursor.clamp(self.provider_count());
-        self.mcp_cursor.clamp(self.mcp_count());
+        self.clamp_right();
     }
 
     fn agent(&self) -> Option<&AgentEntry> {
@@ -1428,13 +1575,32 @@ impl App {
 
     /// The lens actually in force.
     ///
-    /// An agent that stores no MCP servers never shows the MCP pane, whatever
-    /// the toggle was last set to, so selecting one cannot strand you on a pane
-    /// that has nothing to say.
+    /// An agent that stores no MCP servers never shows the MCP pane, and one
+    /// that keeps no skills never shows the skills pane, whatever the cycle was
+    /// last left on. Selecting an agent cannot strand you on a pane that has
+    /// nothing to say.
     fn lens(&self) -> Lens {
         match self.agent() {
-            Some(agent) if agent.capabilities.mcp => self.lens,
+            Some(agent)
+                if lens_supported(
+                    self.lens,
+                    agent.capabilities.mcp,
+                    agent.skills_dir.is_some(),
+                ) =>
+            {
+                self.lens
+            }
             _ => Lens::Providers,
+        }
+    }
+
+    /// Where `v` goes from here, honouring what this agent actually has.
+    fn next_lens(&self) -> Lens {
+        match self.agent() {
+            Some(agent) => {
+                next_lens(self.lens(), agent.capabilities.mcp, agent.skills_dir.is_some())
+            }
+            None => Lens::Providers,
         }
     }
 
@@ -1454,11 +1620,28 @@ impl App {
         self.visible_servers().get(self.mcp_cursor.index()).copied()
     }
 
+    /// The skills the filter lets through, in directory order.
+    fn visible_skills(&self) -> Vec<&Skill> {
+        match self.agent() {
+            Some(agent) => agent.skills.iter().filter(|s| self.filter.matches_skill(s)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn skill_count(&self) -> usize {
+        self.visible_skills().len()
+    }
+
+    fn skill(&self) -> Option<&Skill> {
+        self.visible_skills().get(self.skill_cursor.index()).copied()
+    }
+
     /// How many rows the right pane is showing, whichever lens it is under.
     fn right_count(&self) -> usize {
         match self.lens() {
             Lens::Providers => self.provider_count(),
             Lens::Mcp => self.mcp_count(),
+            Lens::Skills => self.skill_count(),
         }
     }
 
@@ -1483,8 +1666,7 @@ impl App {
         if let Ok(handle) = agent::find(&id) {
             self.agents[index] = AgentEntry::snapshot(handle.as_ref());
         }
-        self.provider_cursor.clamp(self.provider_count());
-        self.mcp_cursor.clamp(self.mcp_count());
+        self.clamp_right();
     }
 
     /// Load the selected agent's config, apply `edit`, save, and re-snapshot.
@@ -1578,18 +1760,22 @@ impl App {
             KeyCode::Right => self.focus = Pane::Providers,
             // These keys keep their meaning and change their subject: `a` adds
             // whatever the right pane is listing.
-            KeyCode::Enter => self.dispatch(self.by_lens(Action::Detail, Action::McpDetail)),
-            KeyCode::Char('u') => self.dispatch(self.by_lens(Action::Use(None), Action::McpToggle)),
-            KeyCode::Char('e') => self.dispatch(self.by_lens(Action::Edit, Action::McpEdit)),
-            KeyCode::Char('a') => self.dispatch(self.by_lens(Action::Add, Action::McpAdd)),
-            KeyCode::Char('d') => self.dispatch(self.by_lens(Action::Delete, Action::McpDelete)),
-            KeyCode::Char('c') => self.dispatch(self.by_lens(Action::Check, Action::McpCheck)),
-            KeyCode::Char('C') => {
-                self.dispatch(self.by_lens(Action::CheckAll, Action::McpCheckAll))
+            KeyCode::Enter => {
+                self.dispatch_lens(Action::Detail, Action::McpDetail, Some(Action::SkillDetail))
             }
+            KeyCode::Char('u') => self.dispatch_lens(Action::Use(None), Action::McpToggle, None),
+            KeyCode::Char('e') => self.dispatch_lens(Action::Edit, Action::McpEdit, None),
+            KeyCode::Char('a') => self.dispatch_lens(Action::Add, Action::McpAdd, None),
+            KeyCode::Char('d') => {
+                self.dispatch_lens(Action::Delete, Action::McpDelete, Some(Action::SkillDelete))
+            }
+            KeyCode::Char('c') => self.dispatch_lens(Action::Check, Action::McpCheck, None),
+            KeyCode::Char('C') => self.dispatch_lens(Action::CheckAll, Action::McpCheckAll, None),
             KeyCode::Char('p') => {
-                self.dispatch(self.by_lens(Action::Preset(None), Action::McpPreset(None)))
+                self.dispatch_lens(Action::Preset(None), Action::McpPreset(None), None)
             }
+            // Only the skills lens has anywhere to copy something to.
+            KeyCode::Char('y') if self.lens() == Lens::Skills => self.dispatch(Action::SkillCopy),
 
             KeyCode::Char('/') => self.dispatch(Action::Filter),
             KeyCode::Char('?') => self.dispatch(Action::Help),
@@ -1604,10 +1790,23 @@ impl App {
     }
 
     /// The variant of a shared binding that applies to the lens now in force.
-    fn by_lens(&self, providers: Action, mcp: Action) -> Action {
+    ///
+    /// `skills` is an `Option` because the skills lens deliberately leaves some
+    /// of these keys unbound: there is no adding or editing a directory of
+    /// Markdown from a list view, so `a` and `e` do nothing there rather than
+    /// reporting a failure the user did not ask for.
+    fn by_lens(&self, providers: Action, mcp: Action, skills: Option<Action>) -> Option<Action> {
         match self.lens() {
-            Lens::Providers => providers,
-            Lens::Mcp => mcp,
+            Lens::Providers => Some(providers),
+            Lens::Mcp => Some(mcp),
+            Lens::Skills => skills,
+        }
+    }
+
+    /// Dispatch the variant for the lens in force, if that lens binds the key.
+    fn dispatch_lens(&mut self, providers: Action, mcp: Action, skills: Option<Action>) {
+        if let Some(action) = self.by_lens(providers, mcp, skills) {
+            self.dispatch(action);
         }
     }
 
@@ -1638,23 +1837,27 @@ impl App {
             self.focus = Pane::Agents;
             if index != self.agent_cursor.index() {
                 self.agent_cursor = Cursor { index };
-                self.provider_cursor = Cursor::default();
-                self.mcp_cursor = Cursor::default();
+                self.reset_right();
             }
             return;
         }
 
         if let Some(index) = self.hits.provider_rows.row(at, self.right_count()) {
             // Click to select, click the selected row again to open it.
-            let cursor = match self.lens() {
+            let lens = self.lens();
+            let cursor = match lens {
                 Lens::Providers => &mut self.provider_cursor,
                 Lens::Mcp => &mut self.mcp_cursor,
+                Lens::Skills => &mut self.skill_cursor,
             };
             let reopen = self.focus == Pane::Providers && index == cursor.index();
             *cursor = Cursor { index };
             self.focus = Pane::Providers;
+            if lens == Lens::Skills {
+                self.announce_skill();
+            }
             if reopen {
-                self.dispatch(self.by_lens(Action::Detail, Action::McpDetail));
+                self.dispatch_lens(Action::Detail, Action::McpDetail, Some(Action::SkillDetail));
             }
             return;
         }
@@ -1694,6 +1897,11 @@ impl App {
                     picker.cursor = Cursor { index };
                 }
             }
+            Some(Overlay::SkillCopy(picker)) => {
+                if let Some(index) = rows.row(at, picker.targets.len()) {
+                    picker.cursor = Cursor { index };
+                }
+            }
             _ => {}
         }
     }
@@ -1715,6 +1923,8 @@ impl App {
                 Overlay::Models(picker) => picker.cursor.step(delta, picker.matches.len()),
                 Overlay::McpDetail { scroll } => *scroll = scrolled(*scroll),
                 Overlay::McpPresets(picker) => picker.cursor.step(delta, picker.presets.len()),
+                Overlay::SkillDetail { scroll } => *scroll = scrolled(*scroll),
+                Overlay::SkillCopy(picker) => picker.cursor.step(delta, picker.targets.len()),
                 Overlay::Form(_) | Overlay::Confirm(_) => {}
             }
             return;
@@ -1723,12 +1933,15 @@ impl App {
         // The wheel reads what is under the pointer without stealing the focus.
         if self.hits.agents.contains(at) {
             self.agent_cursor.step(delta, self.agents.len());
-            self.provider_cursor = Cursor::default();
-            self.mcp_cursor = Cursor::default();
+            self.reset_right();
         } else if self.hits.providers.contains(at) {
             match self.lens() {
                 Lens::Providers => self.provider_cursor.step(delta, self.provider_count()),
                 Lens::Mcp => self.mcp_cursor.step(delta, self.mcp_count()),
+                Lens::Skills => {
+                    self.skill_cursor.step(delta, self.skill_count());
+                    self.announce_skill();
+                }
             }
         }
     }
@@ -1737,20 +1950,45 @@ impl App {
         match (self.focus, self.lens()) {
             (Pane::Agents, _) => {
                 self.agent_cursor.step(delta, self.agents.len());
-                self.provider_cursor = Cursor::default();
-                self.mcp_cursor = Cursor::default();
+                self.reset_right();
             }
             (Pane::Providers, Lens::Providers) => {
                 self.provider_cursor.step(delta, self.provider_count())
             }
             (Pane::Providers, Lens::Mcp) => self.mcp_cursor.step(delta, self.mcp_count()),
+            (Pane::Providers, Lens::Skills) => {
+                self.skill_cursor.step(delta, self.skill_count());
+                // A broken skill says why on selection; the pane has only room
+                // for the marker.
+                self.announce_skill();
+            }
         }
+    }
+
+    /// Send every right-pane cursor back to the top, after the agent changed.
+    fn reset_right(&mut self) {
+        self.provider_cursor = Cursor::default();
+        self.mcp_cursor = Cursor::default();
+        self.skill_cursor = Cursor::default();
     }
 
     /// Keep the right pane's cursor on a real row after its list changed shape.
     fn clamp_right(&mut self) {
         self.provider_cursor.clamp(self.provider_count());
         self.mcp_cursor.clamp(self.mcp_count());
+        self.skill_cursor.clamp(self.skill_count());
+    }
+
+    /// Put the selected skill's problem on the status line, since the pane has
+    /// room for a marker and not a sentence.
+    fn announce_skill(&mut self) {
+        let said = self.skill().map(|skill| match &skill.problem {
+            Some(problem) => (Tone::Bad, format!("{}: {problem}", skill.directory)),
+            None => (Tone::Info, format!("{} · {}", skill.directory, skill.summary())),
+        });
+        if let Some((tone, text)) = said {
+            self.say(tone, text);
+        }
     }
 
     fn schedule(&mut self, job: Job, note: &str) {
@@ -1839,7 +2077,7 @@ impl App {
             prompt: format!("Delete MCP server {} from {}?", server.name, agent.name),
             agent_id: agent.id.clone(),
             subject_id: server.name.clone(),
-            subject: Subject::Mcp,
+            pending: Pending::DeleteMcp,
         }));
     }
 
@@ -1901,6 +2139,137 @@ impl App {
             self.say(Tone::Info, format!("added {name}, but ${} is not set", missing.join(", $")));
         }
         self.select_server(&name);
+    }
+
+    fn open_skill_detail(&mut self) {
+        if self.focus == Pane::Agents {
+            self.focus = Pane::Providers;
+            return;
+        }
+        self.overlay = Some(Overlay::SkillDetail { scroll: 0 });
+    }
+
+    /// Ask before removing a skill, saying plainly that this one is not undoable.
+    ///
+    /// Every other delete in this program rewrites a config file, which `confai
+    /// undo` restores from its backup. A skill is a directory tree, and there is
+    /// no backup of one, so the prompt has to say so.
+    fn ask_delete_skill(&mut self) {
+        let (Some(agent), Some(skill)) = (self.agent(), self.skill()) else { return };
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            prompt: format!(
+                "Delete the skill directory {} from {}? This removes {} files and all, and \
+                 `confai undo` will not bring it back.",
+                skill.directory,
+                agent.name,
+                skill.path.display()
+            ),
+            agent_id: agent.id.clone(),
+            subject_id: skill.directory.clone(),
+            pending: Pending::DeleteSkill,
+        }));
+    }
+
+    fn delete_skill(&mut self, agent_id: &str, directory: &str) {
+        let path = self
+            .agents
+            .iter()
+            .find(|entry| entry.id == agent_id)
+            .and_then(|entry| entry.skills.iter().find(|s| s.directory == directory))
+            .map(|skill| skill.path.clone());
+
+        let Some(path) = path else {
+            self.say(Tone::Bad, format!("no skill called {directory:?}"));
+            return;
+        };
+
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                self.refresh_selected();
+                self.say(Tone::Good, format!("removed {} and its files", path.display()));
+            }
+            Err(err) => self.say(Tone::Bad, format!("delete failed: {err}")),
+        }
+    }
+
+    /// Offer the other agents that keep skills, to copy the selected one into.
+    fn open_skill_copy(&mut self) {
+        let (Some(agent), Some(skill)) = (self.agent(), self.skill()) else { return };
+        let here = agent.id.clone();
+        let picker = SkillCopyPicker {
+            skill: skill.directory.clone(),
+            source: skill.path.clone(),
+            targets: self
+                .agents
+                .iter()
+                .filter(|entry| entry.id != here)
+                .filter_map(|entry| {
+                    entry.skills_dir.clone().map(|dir| SkillTarget {
+                        id: entry.id.clone(),
+                        name: entry.name.clone(),
+                        dir,
+                    })
+                })
+                .collect(),
+            cursor: Cursor::default(),
+        };
+
+        if picker.targets.is_empty() {
+            self.say(Tone::Info, "no other agent keeps skills");
+            return;
+        }
+        self.overlay = Some(Overlay::SkillCopy(picker));
+    }
+
+    /// Copy a skill into one agent, reporting how many files landed.
+    ///
+    /// A same-named skill at the far end is a refusal rather than a silent
+    /// replacement, so `force` is something the user answers for.
+    fn copy_skill(
+        &mut self,
+        source: &std::path::Path,
+        target: &SkillTarget,
+        name: &str,
+        force: bool,
+    ) {
+        match skill::copy(source, &target.dir.join(name), force) {
+            Ok(files) => {
+                // The far end's list changed, and it is not the selected agent.
+                self.reload();
+                self.say(
+                    Tone::Good,
+                    format!(
+                        "copied {name} to {} ({files} file{})",
+                        target.name,
+                        if files == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            Err(err) => self.say(Tone::Bad, format!("{err:#}")),
+        }
+    }
+
+    /// The confirmed second half of a copy that hit a name already in use.
+    fn overwrite_skill(&mut self, from_agent: &str, to_agent: &str, name: &str) {
+        let source = self
+            .agents
+            .iter()
+            .find(|entry| entry.id == from_agent)
+            .and_then(|entry| entry.skills.iter().find(|s| s.directory == name))
+            .map(|skill| skill.path.clone());
+        let target = self.agents.iter().find(|entry| entry.id == to_agent).and_then(|entry| {
+            entry.skills_dir.clone().map(|dir| SkillTarget {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                dir,
+            })
+        });
+
+        let (Some(source), Some(target)) = (source, target) else {
+            self.say(Tone::Bad, format!("cannot copy {name:?} any more"));
+            return;
+        };
+        self.copy_skill(&source, &target, name, true);
     }
 
     /// Put the cursor on a named MCP server, dropping a filter that hides it.
@@ -2083,7 +2452,7 @@ impl App {
             prompt: format!("Delete {} from {}?", provider.id, agent.name),
             agent_id: agent.id.clone(),
             subject_id: provider.id.clone(),
-            subject: Subject::Provider,
+            pending: Pending::DeleteProvider,
         }));
     }
 
@@ -2115,6 +2484,10 @@ impl App {
                 scroll_key(key, scroll).map(|scroll| Overlay::McpDetail { scroll })
             }
             Overlay::McpPresets(picker) => self.mcp_preset_key(key, picker),
+            Overlay::SkillDetail { scroll } => {
+                scroll_key(key, scroll).map(|scroll| Overlay::SkillDetail { scroll })
+            }
+            Overlay::SkillCopy(picker) => self.skill_copy_key(key, picker),
         };
         // A handler that opened its own overlay — a form, the preset picker —
         // wins over the one it replaced.
@@ -2317,10 +2690,10 @@ impl App {
     fn confirm_key(&mut self, key: KeyEvent, confirm: Confirm) -> Option<Overlay> {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let Confirm { agent_id, subject_id: id, subject, .. } = confirm;
+                let Confirm { agent_id, subject_id: id, pending, .. } = confirm;
                 self.select_agent(&agent_id);
-                match subject {
-                    Subject::Provider => {
+                match pending {
+                    Pending::DeleteProvider => {
                         self.health.forget(&agent_id, &id);
                         self.apply("delete", move |config| {
                             if config.remove_provider(&id)? {
@@ -2330,7 +2703,7 @@ impl App {
                             }
                         });
                     }
-                    Subject::Mcp => {
+                    Pending::DeleteMcp => {
                         self.mcp_health.forget(&agent_id, &id);
                         self.apply("delete", move |config| {
                             if config.remove_mcp(&id)? {
@@ -2339,6 +2712,10 @@ impl App {
                                 anyhow::bail!("no MCP server called {id:?}")
                             }
                         });
+                    }
+                    Pending::DeleteSkill => self.delete_skill(&agent_id, &id),
+                    Pending::OverwriteSkill { target_agent } => {
+                        self.overwrite_skill(&agent_id, &target_agent, &id)
                     }
                 }
                 self.clamp_right();
@@ -2393,6 +2770,43 @@ impl App {
                 None
             }
             _ => Some(Overlay::McpPresets(picker)),
+        }
+    }
+
+    fn skill_copy_key(&mut self, key: KeyEvent, mut picker: SkillCopyPicker) -> Option<Overlay> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                picker.cursor.step(-1, picker.targets.len());
+                Some(Overlay::SkillCopy(picker))
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                picker.cursor.step(1, picker.targets.len());
+                Some(Overlay::SkillCopy(picker))
+            }
+            KeyCode::Enter => {
+                let target = picker.targets.get(picker.cursor.index()).cloned()?;
+                let from_agent = self.agent().map(|a| a.id.clone()).unwrap_or_default();
+                self.copy_skill(&picker.source, &target, &picker.skill, false);
+
+                // `skill::copy` refuses a name already in use rather than
+                // replacing it, and says so by asking for force. That refusal is
+                // the question worth asking, so put it to the user instead of
+                // forcing it for them. Any other failure is just a failure.
+                if self.status.tone == Tone::Bad && self.status.text.contains("--force") {
+                    return Some(Overlay::Confirm(Confirm {
+                        prompt: format!(
+                            "{} Overwrite the copy already in {}?",
+                            self.status.text, target.name
+                        ),
+                        agent_id: from_agent,
+                        subject_id: picker.skill.clone(),
+                        pending: Pending::OverwriteSkill { target_agent: target.id },
+                    }));
+                }
+                None
+            }
+            _ => Some(Overlay::SkillCopy(picker)),
         }
     }
 
@@ -2510,6 +2924,14 @@ impl App {
                 hits.overlay = Some(area);
                 hits.overlay_rows = rows;
             }
+            Some(Overlay::SkillDetail { scroll }) => {
+                hits.overlay = Some(self.render_skill_detail(frame, *scroll))
+            }
+            Some(Overlay::SkillCopy(picker)) => {
+                let (area, rows) = render_skill_copy(frame, picker);
+                hits.overlay = Some(area);
+                hits.overlay_rows = rows;
+            }
             None => {}
         }
         hits
@@ -2617,7 +3039,8 @@ impl App {
         match &self.overlay {
             Some(Overlay::About { .. })
             | Some(Overlay::Detail(_))
-            | Some(Overlay::McpDetail { .. }) => {
+            | Some(Overlay::McpDetail { .. })
+            | Some(Overlay::SkillDetail { .. }) => {
                 vec![Hint::plain("↑↓", "scroll"), Hint::plain("esc", "close")]
             }
             Some(Overlay::Form(form)) if form.editing => vec![
@@ -2632,9 +3055,14 @@ impl App {
                 Hint::plain("ctrl+s or F2", "save"),
                 Hint::plain("esc", "cancel"),
             ],
-            Some(Overlay::Confirm(_)) => {
-                vec![Hint::plain("y", "delete"), Hint::plain("n", "cancel")]
+            Some(Overlay::Confirm(confirm)) => {
+                vec![Hint::plain("y", confirm.pending.verb()), Hint::plain("n", "cancel")]
             }
+            Some(Overlay::SkillCopy(_)) => vec![
+                Hint::plain("↑↓", "move"),
+                Hint::plain("enter", "copy here"),
+                Hint::plain("esc", "cancel"),
+            ],
             Some(Overlay::Presets(_)) | Some(Overlay::McpPresets(_)) => vec![
                 Hint::plain("↑↓", "move"),
                 Hint::plain("enter", "apply"),
@@ -2695,6 +3123,15 @@ impl App {
                         Action::Palette,
                         Action::Help,
                     ]),
+                    (Pane::Providers, Lens::Skills) => Hint::bar([
+                        Action::Lens(None),
+                        Action::SkillDetail,
+                        Action::Filter,
+                        Action::SkillCopy,
+                        Action::SkillDelete,
+                        Action::Palette,
+                        Action::Help,
+                    ]),
                 });
                 hints
             }
@@ -2747,6 +3184,7 @@ impl App {
         match self.lens() {
             Lens::Providers => self.provider_pane(area),
             Lens::Mcp => self.mcp_pane(area),
+            Lens::Skills => self.skill_pane(area),
         }
     }
 
@@ -2953,6 +3391,144 @@ impl App {
             selected: self.mcp_cursor.index(),
             empty: Vec::new(),
         }
+    }
+
+    /// Skills are directories, so there is nothing to probe and no kind to show:
+    /// a skill either parses into something the agent can use, or it does not.
+    fn skill_pane(&self, area: Rect) -> ListPane {
+        let focused = self.focus == Pane::Providers;
+        let Some(agent) = self.agent() else {
+            return ListPane::notice("skills", focused, vec!["no agent selected".to_string()]);
+        };
+        let Some(dir) = &agent.skills_dir else {
+            return ListPane::notice(
+                &format!("{} · skills", agent.name),
+                focused,
+                vec![format!("{} does not keep skills", agent.name)],
+            );
+        };
+
+        let total = agent.skills.len();
+        let visible = self.visible_skills();
+        let title = self.pane_title(agent, Lens::Skills, visible.len(), total);
+
+        if total == 0 {
+            return ListPane::notice(
+                &title,
+                focused,
+                vec![
+                    format!("{} has no skills installed", agent.name),
+                    String::new(),
+                    format!(
+                        "a skill is a directory with a {} in {}",
+                        skill::MANIFEST,
+                        dir.display()
+                    ),
+                ],
+            );
+        }
+        if visible.is_empty() {
+            return ListPane::notice(
+                &title,
+                focused,
+                vec![
+                    format!("nothing matches \"{}\"", self.filter.query.trim()),
+                    String::new(),
+                    "press esc to clear the filter".to_string(),
+                ],
+            );
+        }
+
+        let inner = area.width.saturating_sub(2) as usize;
+        let columns = Columns::flexible(inner.saturating_sub(1), &[1, 24], 2, 20);
+
+        let rows = visible
+            .iter()
+            .map(|skill| {
+                let tone = if skill.is_healthy() { Tone::Good } else { Tone::Bad };
+                let mut row = Row::default();
+                row.cell(&columns, tone.glyph(), tone.style());
+                row.cell(&columns, &skill.directory, Style::default().fg(palette::TEXT));
+                row.cell(&columns, &skill.summary(), Style::default().fg(palette::MUTED));
+                // Still listed, because a broken skill is what people come to find.
+                row.dim = !skill.is_healthy();
+                row
+            })
+            .collect();
+
+        ListPane {
+            title,
+            focused,
+            header: Some(columns.header(&["", "skill", "what it is for"])),
+            rows,
+            selected: self.skill_cursor.index(),
+            empty: Vec::new(),
+        }
+    }
+
+    fn render_skill_detail(&self, frame: &mut Frame, scroll: u16) -> Rect {
+        let area = centered(frame.area(), 76, 78);
+        let (Some(agent), Some(skill)) = (self.agent(), self.skill()) else { return area };
+
+        let mut lines = vec![
+            labelled("agent", &agent.name),
+            labelled("directory", &skill.directory),
+            labelled("path", &skill.path.display().to_string()),
+        ];
+
+        // Only worth showing when it disagrees, which is itself the problem the
+        // agent will trip over.
+        if let Some(declared) = skill.declared_name.as_deref().filter(|n| *n != skill.directory) {
+            lines.push(labelled("declared name", declared));
+        }
+
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "description",
+            Style::default().fg(palette::ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        match &skill.description {
+            Some(description) => lines.push(Line::from(Span::styled(
+                format!("  {description}"),
+                Style::default().fg(palette::TEXT),
+            ))),
+            None => {
+                lines.push(Line::from(Span::styled("  none", Style::default().fg(palette::FAINT))))
+            }
+        }
+
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!("allowed-tools ({})", skill.allowed_tools.len()),
+            Style::default().fg(palette::ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        if skill.allowed_tools.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  unrestricted",
+                Style::default().fg(palette::FAINT),
+            )));
+        }
+        for tool in &skill.allowed_tools {
+            lines.push(Line::from(Span::styled(
+                format!("  {tool}"),
+                Style::default().fg(palette::MUTED),
+            )));
+        }
+
+        if let Some(problem) = &skill.problem {
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled("problem  ", Style::default().fg(palette::BAD)),
+                Span::styled(problem.clone(), Style::default().fg(palette::BAD)),
+            ]));
+        }
+
+        let inner = overlay_frame(frame, area, &format!("skill · {}", skill.directory));
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)),
+            inner,
+        );
+        area
     }
 
     fn render_mcp_detail(&self, frame: &mut Frame, scroll: u16) -> Rect {
@@ -3302,6 +3878,7 @@ fn render_about(frame: &mut Frame, scroll: u16) -> Rect {
     let sections = [
         (None, [navigation, bindings(menu())].concat()),
         (Some("with the right pane showing mcp servers (v)"), bindings(mcp_menu())),
+        (Some("with the right pane showing skills (v)"), bindings(skill_menu())),
     ];
     let key_width = sections
         .iter()
@@ -3381,7 +3958,14 @@ fn render_form(frame: &mut Frame, form: &Form) -> Rect {
 }
 
 fn render_confirm(frame: &mut Frame, confirm: &Confirm) -> Rect {
-    let area = centered_fixed(frame.area(), 60, 5);
+    const WIDTH: u16 = 60;
+    // A prompt that has to explain itself — a skill delete says the directory is
+    // going and undo will not help — wraps, and the box grows to keep the y/n
+    // line on screen rather than pushing it out of the frame.
+    let per_line = WIDTH.saturating_sub(4).max(1) as usize;
+    let wrapped = confirm.prompt.chars().count().div_ceil(per_line).max(1) as u16;
+
+    let area = centered_fixed(frame.area(), WIDTH, 4 + wrapped);
     let inner = overlay_frame(frame, area, "confirm");
     frame.render_widget(
         Paragraph::new(vec![
@@ -3389,7 +3973,10 @@ fn render_confirm(frame: &mut Frame, confirm: &Confirm) -> Rect {
             Line::default(),
             Line::from(vec![
                 Span::styled("y", Style::default().fg(palette::BAD)),
-                Span::styled(" delete", Style::default().fg(palette::MUTED)),
+                Span::styled(
+                    format!(" {}", confirm.pending.verb()),
+                    Style::default().fg(palette::MUTED),
+                ),
                 Span::styled(" · ", Style::default().fg(palette::FAINT)),
                 Span::styled("n", Style::default().fg(palette::ACCENT)),
                 Span::styled(" cancel", Style::default().fg(palette::MUTED)),
@@ -3463,6 +4050,38 @@ fn render_mcp_presets(frame: &mut Frame, picker: &McpPresetPicker) -> (Rect, Row
         rows,
         selected: picker.cursor.index(),
         empty: vec!["no MCP presets available".to_string()],
+    }
+    .render_overlay(frame, area);
+    (area, rows_at)
+}
+
+fn render_skill_copy(frame: &mut Frame, picker: &SkillCopyPicker) -> (Rect, RowsAt) {
+    let area = centered(frame.area(), 70, 60);
+    let inner = area.width.saturating_sub(2) as usize;
+    let columns = Columns::flexible(inner.saturating_sub(1), &[18], 1, 20);
+
+    let rows = picker
+        .targets
+        .iter()
+        .map(|target| {
+            let mut row = Row::default();
+            row.cell(&columns, &target.name, Style::default().fg(palette::TEXT));
+            row.cell(
+                &columns,
+                &target.dir.join(&picker.skill).display().to_string(),
+                Style::default().fg(palette::MUTED),
+            );
+            row
+        })
+        .collect();
+
+    let rows_at = ListPane {
+        title: format!("copy {} to", picker.skill),
+        focused: true,
+        header: Some(columns.header(&["agent", "lands at"])),
+        rows,
+        selected: picker.cursor.index(),
+        empty: vec!["no other agent keeps skills".to_string()],
     }
     .render_overlay(frame, area);
     (area, rows_at)
@@ -3773,6 +4392,10 @@ mod render_tests {
                     remote
                 },
             ],
+            // Codex keeps no skills, which is what makes it the agent the lens
+            // cycle has to skip.
+            skills_dir: None,
+            skills: Vec::new(),
             error: None,
         };
         for (id, url, key) in [
@@ -3803,6 +4426,25 @@ mod render_tests {
             active: None,
             model: Some("codexsale/gpt-5.5".into()),
             mcp: Vec::new(),
+            skills_dir: Some(PathBuf::from("/home/u/.config/opencode/skills")),
+            skills: vec![
+                Skill {
+                    directory: "commit-writer".into(),
+                    declared_name: Some("commit-writer".into()),
+                    description: Some("writes conventional commit messages".into()),
+                    allowed_tools: vec!["Bash".into(), "Read".into()],
+                    path: PathBuf::from("/home/u/.config/opencode/skills/commit-writer"),
+                    problem: None,
+                },
+                Skill {
+                    directory: "half-done".into(),
+                    declared_name: None,
+                    description: None,
+                    allowed_tools: Vec::new(),
+                    path: PathBuf::from("/home/u/.config/opencode/skills/half-done"),
+                    problem: Some("front matter has no description".into()),
+                },
+            ],
             error: None,
         };
 
@@ -3811,6 +4453,7 @@ mod render_tests {
             agent_cursor: Cursor::default(),
             provider_cursor: Cursor::default(),
             mcp_cursor: Cursor::default(),
+            skill_cursor: Cursor::default(),
             focus: Pane::Providers,
             lens: Lens::default(),
             filter: Filter::default(),
@@ -3881,7 +4524,7 @@ mod render_tests {
                 prompt: "delete primary?".into(),
                 agent_id: "codex".into(),
                 subject_id: "primary".into(),
-                subject: Subject::Provider,
+                pending: Pending::DeleteProvider,
             }),
             Overlay::McpDetail { scroll: 0 },
             Overlay::McpPresets(McpPresetPicker {
@@ -3889,6 +4532,17 @@ mod render_tests {
                 cursor: Cursor::default(),
             }),
             Overlay::Form(Form::mcp("codex", None)),
+            Overlay::SkillDetail { scroll: 0 },
+            Overlay::SkillCopy(SkillCopyPicker {
+                skill: "commit-writer".into(),
+                source: PathBuf::from("/home/u/.config/opencode/skills/commit-writer"),
+                targets: vec![SkillTarget {
+                    id: "claude".into(),
+                    name: "Claude Code".into(),
+                    dir: PathBuf::from("/home/u/.claude/skills"),
+                }],
+                cursor: Cursor::default(),
+            }),
         ] {
             let mut app = scene();
             app.overlay = Some(overlay);
@@ -3926,6 +4580,124 @@ mod render_tests {
     }
 
     #[test]
+    fn an_agent_that_keeps_no_skills_never_lands_on_the_skills_lens() {
+        let mut app = scene();
+        // Codex is selected, and keeps no skills.
+        assert!(app.agents[0].skills_dir.is_none());
+
+        app.dispatch(Action::Lens(None));
+        assert_eq!(app.lens(), Lens::Mcp);
+        app.dispatch(Action::Lens(None));
+        assert_eq!(app.lens(), Lens::Providers, "skills must be skipped on Codex");
+
+        // opencode keeps skills, so the same key reaches all three there.
+        app.agent_cursor = Cursor { index: 1 };
+        app.dispatch(Action::Lens(None));
+        assert_eq!(app.lens(), Lens::Mcp);
+        app.dispatch(Action::Lens(None));
+        assert_eq!(app.lens(), Lens::Skills);
+        app.dispatch(Action::Lens(None));
+        assert_eq!(app.lens(), Lens::Providers);
+    }
+
+    /// The skills pane, on the agent that has any.
+    fn skills_scene() -> App {
+        let mut app = scene();
+        app.agent_cursor = Cursor { index: 1 };
+        app.lens = Lens::Skills;
+        app
+    }
+
+    #[test]
+    fn the_skills_lens_marks_a_broken_skill_differently_from_a_healthy_one() {
+        let mut app = skills_scene();
+        let text = screen(&mut app, 120, 30);
+
+        assert!(text.contains("skills 2"), "no skill count in the title:\n{text}");
+        // The description, not just the directory name.
+        assert!(text.contains("writes conventional commit"), "no summary:\n{text}");
+
+        let row = |needle: &str| {
+            text.lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no row for {needle}:\n{text}"))
+                .to_string()
+        };
+        let healthy = row("commit-writer");
+        let broken = row("half-done");
+
+        assert!(healthy.contains(Tone::Good.glyph()), "healthy skill unmarked: {healthy:?}");
+        assert!(broken.contains(Tone::Bad.glyph()), "broken skill unmarked: {broken:?}");
+        assert!(
+            !healthy.contains(Tone::Bad.glyph()),
+            "a healthy skill must not carry the bad marker: {healthy:?}"
+        );
+
+        // No kind column and no health column: neither means anything here.
+        assert!(!text.contains("stdio"), "an mcp column leaked into the skills pane:\n{text}");
+    }
+
+    #[test]
+    fn the_skills_pane_never_appears_for_an_agent_that_keeps_none() {
+        let mut app = scene();
+        app.lens = Lens::Skills;
+        // Codex keeps no skills, so the lens falls back rather than drawing empty.
+        assert_eq!(app.lens(), Lens::Providers);
+        let text = screen(&mut app, 120, 30);
+        assert!(text.contains("providers 3"), "expected the provider pane:\n{text}");
+    }
+
+    #[test]
+    fn deleting_a_skill_warns_that_undo_will_not_bring_it_back() {
+        let mut app = skills_scene();
+        app.dispatch(Action::SkillDelete);
+        let text = screen(&mut app, 120, 30);
+
+        assert!(text.contains("commit-writer"), "the confirm names no skill:\n{text}");
+        // The two things that make this delete unlike every other one.
+        assert!(text.contains("directory"), "the confirm hides that a directory goes:\n{text}");
+        assert!(text.contains("undo"), "the confirm does not mention undo:\n{text}");
+        assert!(text.contains("not bring it back"), "irreversibility unstated:\n{text}");
+    }
+
+    #[test]
+    fn the_skill_detail_shows_the_description_tools_and_any_problem() {
+        let mut app = skills_scene();
+        app.overlay = Some(Overlay::SkillDetail { scroll: 0 });
+        let healthy = screen(&mut app, 120, 30);
+        assert!(healthy.contains("writes conventional commit messages"), "{healthy}");
+        assert!(healthy.contains("Bash") && healthy.contains("Read"), "no tools:\n{healthy}");
+        assert!(healthy.contains("skills/commit-writer"), "no path:\n{healthy}");
+
+        app.skill_cursor = Cursor { index: 1 };
+        let broken = screen(&mut app, 120, 30);
+        assert!(broken.contains("problem"), "no problem line:\n{broken}");
+        assert!(broken.contains("no description"), "the problem text is missing:\n{broken}");
+    }
+
+    #[test]
+    fn selecting_a_broken_skill_says_why_on_the_status_line() {
+        let mut app = skills_scene();
+        app.focus = Pane::Providers;
+        app.move_focused(1);
+
+        assert_eq!(app.status.tone, Tone::Bad);
+        assert!(app.status.text.contains("no description"), "{}", app.status.text);
+    }
+
+    #[test]
+    fn the_skills_lens_offers_no_add_and_no_edit() {
+        let app = skills_scene();
+        // Unbound rather than blocked: pressing them does nothing at all.
+        assert_eq!(app.by_lens(Action::Add, Action::McpAdd, None), None);
+        assert_eq!(app.by_lens(Action::Edit, Action::McpEdit, None), None);
+        assert_eq!(
+            app.by_lens(Action::Detail, Action::McpDetail, Some(Action::SkillDetail)),
+            Some(Action::SkillDetail)
+        );
+    }
+
+    #[test]
     fn the_mcp_detail_masks_environment_values() {
         let mut app = scene();
         app.lens = Lens::Mcp;
@@ -3959,9 +4731,20 @@ mod render_tests {
         app.lens = Lens::Mcp;
         let servers = screen(&mut app, 160, 30);
         let hints = servers.lines().last().unwrap();
-        assert!(hints.contains("v providers/mcp"), "no lens hint: {hints:?}");
+        assert!(hints.contains("v lens"), "no lens hint: {hints:?}");
         assert!(hints.contains("u on/off"), "no toggle hint: {hints:?}");
         assert!(!hints.contains("sync"), "provider-only hint survived: {hints:?}");
+
+        let mut app = skills_scene();
+        let skills = screen(&mut app, 160, 30);
+        let hints = skills.lines().last().unwrap();
+        assert!(hints.contains("v lens"), "no lens hint: {hints:?}");
+        assert!(hints.contains("y copy"), "no copy hint: {hints:?}");
+        assert!(hints.contains("d del"), "no delete hint: {hints:?}");
+        // The keys the skills lens deliberately does not bind stay off the bar.
+        assert!(!hints.contains("a add"), "add offered on skills: {hints:?}");
+        assert!(!hints.contains("e edit"), "edit offered on skills: {hints:?}");
+        assert!(!hints.contains("check"), "health probing offered on skills: {hints:?}");
     }
 
     #[test]
@@ -4260,11 +5043,71 @@ mod tests {
     }
 
     #[test]
-    fn the_lens_names_itself_and_toggles() {
-        assert_eq!(Lens::Providers.other(), Lens::Mcp);
-        assert_eq!(Lens::Mcp.other().other(), Lens::Mcp);
+    fn the_lens_names_itself_and_cycles_through_all_three() {
         assert_eq!(Lens::default(), Lens::Providers);
         assert_eq!(Lens::Mcp.label(), "mcp");
+        assert_eq!(Lens::Skills.label(), "skills");
+
+        // An agent with everything walks the whole cycle and comes back round.
+        let cycle = |from| next_lens(from, true, true);
+        assert_eq!(cycle(Lens::Providers), Lens::Mcp);
+        assert_eq!(cycle(Lens::Mcp), Lens::Skills);
+        assert_eq!(cycle(Lens::Skills), Lens::Providers);
+    }
+
+    #[test]
+    fn cycling_skips_the_lenses_the_agent_has_no_facility_for() {
+        // Codex: MCP servers but no skills, so `v` is a two-way toggle.
+        assert_eq!(next_lens(Lens::Providers, true, false), Lens::Mcp);
+        assert_eq!(next_lens(Lens::Mcp, true, false), Lens::Providers);
+
+        // The mirror image, for an agent with skills and no MCP.
+        assert_eq!(next_lens(Lens::Providers, false, true), Lens::Skills);
+        assert_eq!(next_lens(Lens::Skills, false, true), Lens::Providers);
+
+        // Nothing to cycle to at all stays put rather than looping forever.
+        assert_eq!(next_lens(Lens::Providers, false, false), Lens::Providers);
+
+        // A lens the agent lost is still a place to cycle *from*.
+        assert_eq!(next_lens(Lens::Skills, true, false), Lens::Providers);
+    }
+
+    fn skills() -> Vec<Skill> {
+        let build = |directory: &str, description: Option<&str>| Skill {
+            directory: directory.into(),
+            declared_name: None,
+            description: description.map(str::to_owned),
+            allowed_tools: Vec::new(),
+            path: PathBuf::from("/skills").join(directory),
+            problem: None,
+        };
+        vec![
+            build("commit-writer", Some("writes conventional commit messages")),
+            build("deep-research", Some("fans out web searches and cites sources")),
+            build("bare", None),
+        ]
+    }
+
+    fn matching_skills(query: &str) -> Vec<String> {
+        let filter = Filter { query: query.to_string(), editing: false };
+        skills().iter().filter(|s| filter.matches_skill(s)).map(|s| s.directory.clone()).collect()
+    }
+
+    #[test]
+    fn a_filter_finds_a_skill_by_directory_or_description() {
+        assert_eq!(matching_skills("commit"), vec!["commit-writer"]);
+        // The description, which is the part nobody remembers the folder name of.
+        assert_eq!(matching_skills("cites sources"), vec!["deep-research"]);
+        assert_eq!(matching_skills("bare"), vec!["bare"]);
+    }
+
+    #[test]
+    fn a_skill_filter_ignores_case_and_can_match_nothing() {
+        assert_eq!(matching_skills("COMMIT-WRITER"), vec!["commit-writer"]);
+        assert_eq!(matching_skills("").len(), 3);
+        assert!(matching_skills("no-such-skill").is_empty());
+        // A skill with no description is not a match for every query.
+        assert!(matching_skills("searches").iter().all(|name| name != "bare"));
     }
 
     #[test]
