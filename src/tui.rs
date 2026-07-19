@@ -34,7 +34,7 @@ use crate::agent::{self, Agent, AgentConfig, Capabilities, Detection};
 use crate::brand::{self, palette};
 use crate::domain::{mask, Model, Provider, WireApi};
 use crate::mcp;
-use crate::net::{self, catalog};
+use crate::net::{self, catalog, registry};
 use crate::preset::{self, Preset};
 use crate::skill::{self, Skill};
 use crate::store;
@@ -100,6 +100,11 @@ const COMPACT_HEIGHT: u16 = 30;
 const TAGLINE_WIDTH: u16 = 100;
 /// The agent pane never grows; the provider pane is the one with columns to fill.
 const AGENT_PANE_WIDTH: u16 = 30;
+
+/// How many registry records to ask for before de-duplication, matching
+/// `confai mcp search --limit`. The registry publishes one record per published
+/// version, so this is a good deal fewer than fifty distinct servers.
+const REGISTRY_LIMIT: usize = 50;
 
 /// Keys that only move the cursor, so they dispatch no action and appear in the
 /// help screen by hand.
@@ -547,6 +552,8 @@ enum Action {
     McpToggle,
     /// Apply a named MCP preset, or `None` to open the picker.
     McpPreset(Option<String>),
+    /// Search the official MCP registry and install from it.
+    Registry,
     SkillDetail,
     SkillDelete,
     /// Copy the selected skill into another agent's skills directory.
@@ -606,6 +613,7 @@ fn mcp_menu() -> Vec<Action> {
         Action::McpCheck,
         Action::McpCheckAll,
         Action::McpPreset(None),
+        Action::Registry,
     ]
 }
 
@@ -646,6 +654,7 @@ impl Action {
             Action::McpToggle => "enable or disable mcp server".into(),
             Action::McpPreset(Some(id)) => format!("mcp preset {id}"),
             Action::McpPreset(None) => "apply an mcp preset".into(),
+            Action::Registry => "search the mcp registry".into(),
             Action::SkillDetail => "skill detail".into(),
             Action::SkillDelete => "delete skill".into(),
             Action::SkillCopy => "copy skill to another agent".into(),
@@ -685,6 +694,7 @@ impl Action {
             Action::McpCheckAll => "check all",
             Action::McpToggle => "on/off",
             Action::McpPreset(_) => "preset",
+            Action::Registry => "registry",
             Action::SkillDetail => "detail",
             Action::SkillDelete => "del",
             Action::SkillCopy => "copy",
@@ -732,6 +742,9 @@ impl Action {
             Action::McpToggle => "turn this mcp server on or off without deleting it".into(),
             Action::McpPreset(Some(_)) => "add this ready-made mcp server to the agent".into(),
             Action::McpPreset(None) => "choose a ready-made mcp server to add".into(),
+            Action::Registry => {
+                "search the official registry of MCP servers and install one".into()
+            }
             Action::SkillDetail => "show the description, tools and any problem in full".into(),
             Action::SkillDelete => {
                 "delete this skill's directory, which undo cannot restore".into()
@@ -778,6 +791,7 @@ impl Action {
             Action::McpCheckAll => "C",
             Action::McpToggle => "u",
             Action::McpPreset(_) => "p",
+            Action::Registry => "g",
             Action::SkillDetail => "enter",
             Action::SkillDelete => "d",
             Action::SkillCopy => "y",
@@ -869,7 +883,7 @@ impl Action {
             Action::Lens(Some(Lens::Providers)) => None,
             Action::Lens(Some(Lens::Mcp)) => no_mcp(),
             Action::Lens(Some(Lens::Skills)) => no_skills(),
-            Action::McpAdd | Action::McpPreset(_) => no_mcp(),
+            Action::McpAdd | Action::McpPreset(_) | Action::Registry => no_mcp(),
             Action::McpDetail
             | Action::McpEdit
             | Action::McpDelete
@@ -934,6 +948,9 @@ impl Action {
             Action::McpToggle => app.toggle_mcp(),
             Action::McpPreset(Some(id)) => app.apply_mcp_preset_by_id(&id),
             Action::McpPreset(None) => app.open_mcp_presets(),
+            Action::Registry => {
+                app.schedule(Job::Registry(String::new()), "searching the MCP registry...")
+            }
 
             Action::SkillDetail => app.open_skill_detail(),
             Action::SkillDelete => app.ask_delete_skill(),
@@ -1499,6 +1516,68 @@ fn update_report(status: &crate::update::Status) -> Report {
     report
 }
 
+/// Servers from the official MCP registry, filtered as you type.
+///
+/// The query does two jobs and they are deliberately on different keys: typing
+/// filters what was already fetched, which is instant, and `ctrl+r` asks the
+/// registry again, which is an HTTP round trip. Filtering as a side effect of
+/// typing would put a request behind every keystroke.
+struct RegistryPicker {
+    /// What was last asked of the registry, and what is now filtering the answer.
+    query: String,
+    entries: Vec<registry::Entry>,
+    matches: Vec<usize>,
+    cursor: Cursor,
+}
+
+impl RegistryPicker {
+    fn new(query: String, entries: Vec<registry::Entry>) -> Self {
+        let mut picker = Self { query, entries, matches: Vec::new(), cursor: Cursor::default() };
+        picker.rebuild();
+        picker
+    }
+
+    fn rebuild(&mut self) {
+        self.matches = rank_by(&self.entries, &self.query, |entry| entry.name.clone());
+        self.cursor.clamp(self.matches.len());
+    }
+
+    fn selected(&self) -> Option<&registry::Entry> {
+        self.matches.get(self.cursor.index()).and_then(|index| self.entries.get(*index))
+    }
+}
+
+/// How a registry entry would be started, in one line.
+fn launch_summary(entry: &registry::Entry) -> String {
+    match entry.preferred() {
+        Some(registry::Launch::Package { runtime, args, .. }) => {
+            format!("{runtime} {}", args.join(" "))
+        }
+        Some(registry::Launch::Remote { url }) => url.clone(),
+        None => "nothing installable".to_string(),
+    }
+}
+
+/// The variables an entry needs that this environment does not set, written the
+/// way the status line reports them.
+///
+/// Secrets are called out because the registry knows which values are
+/// credentials and the user is the only one who has them.
+fn missing_env_of(entry: &registry::Entry) -> Vec<String> {
+    entry
+        .missing_env()
+        .iter()
+        .map(|var| format!("${}{}", var.name, if var.secret { " (a secret)" } else { "" }))
+        .collect()
+}
+
+/// What to say when a server went into the config without everything it needs.
+///
+/// `None` when it needs nothing, so the caller has no empty case to special-case.
+fn missing_note(name: &str, missing: &[String]) -> Option<String> {
+    (!missing.is_empty()).then(|| format!("added {name}, but {} not set", missing.join(", ")))
+}
+
 /// Which editor to hand a config to.
 ///
 /// `VISUAL` wins over `EDITOR`, as it does everywhere else, and either being set
@@ -1689,10 +1768,11 @@ enum Overlay {
     SkillCopy(SkillCopyPicker),
     /// What `doctor` or `update` had to say.
     Report(Report),
+    Registry(RegistryPicker),
 }
 
 /// Work that must be visibly announced before it blocks the event loop.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Job {
     Check,
     CheckAll,
@@ -1710,6 +1790,8 @@ enum Job {
     /// Hand the selected agent's config to `$EDITOR`, which needs the terminal
     /// this program is drawing on.
     EditConfig,
+    /// Ask the official MCP registry for the servers matching a query.
+    Registry(String),
 }
 
 /// Where a list was last drawn and how far it had scrolled, so a click can be
@@ -2060,6 +2142,9 @@ impl App {
             KeyCode::Char('p') => {
                 self.dispatch_lens(Action::Preset(None), Action::McpPreset(None), None)
             }
+            // The registry lists a thousand-odd servers and the presets nine, so
+            // they are different enough things to deserve separate keys.
+            KeyCode::Char('g') if self.lens() == Lens::Mcp => self.dispatch(Action::Registry),
             // Only the skills lens has anywhere to copy something to.
             KeyCode::Char('y') if self.lens() == Lens::Skills => self.dispatch(Action::SkillCopy),
 
@@ -2191,6 +2276,11 @@ impl App {
                     picker.cursor = Cursor { index };
                 }
             }
+            Some(Overlay::Registry(picker)) => {
+                if let Some(index) = rows.row(at, picker.matches.len()) {
+                    picker.cursor = Cursor { index };
+                }
+            }
             _ => {}
         }
     }
@@ -2215,6 +2305,7 @@ impl App {
                 Overlay::SkillDetail { scroll } => *scroll = scrolled(*scroll),
                 Overlay::SkillCopy(picker) => picker.cursor.step(delta, picker.targets.len()),
                 Overlay::Report(report) => report.scroll = scrolled(report.scroll),
+                Overlay::Registry(picker) => picker.cursor.step(delta, picker.matches.len()),
                 Overlay::Form(_) | Overlay::Confirm(_) => {}
             }
             return;
@@ -2296,6 +2387,31 @@ impl App {
             Job::Sync { prune } => self.sync_selected(prune),
             Job::Update => self.check_update(),
             Job::EditConfig => self.edit_config(terminal),
+            Job::Registry(query) => self.search_registry(&query),
+        }
+    }
+
+    /// Ask the registry, and offer whatever came back as a picker.
+    fn search_registry(&mut self, query: &str) {
+        match registry::search(query, REGISTRY_LIMIT) {
+            Ok(entries) if entries.is_empty() => {
+                self.say(Tone::Info, "the registry returned nothing for that")
+            }
+            Ok(entries) => {
+                let count = entries.len();
+                self.overlay =
+                    Some(Overlay::Registry(RegistryPicker::new(query.to_string(), entries)));
+                self.say(Tone::Info, format!("{count} server(s) in the registry"));
+            }
+            Err(err) => self.say(Tone::Bad, format!("registry search failed: {err:#}")),
+        }
+    }
+
+    /// Add a registry entry to the selected agent.
+    fn install_registry(&mut self, entry: &registry::Entry) {
+        match entry.to_server(None) {
+            Ok(server) => self.install_server("mcp install", server, missing_env_of(entry)),
+            Err(err) => self.say(Tone::Bad, format!("{err:#}")),
         }
     }
 
@@ -2476,21 +2592,35 @@ impl App {
             }
         };
 
-        let missing: Vec<String> = entry.missing_env().iter().map(|v| v.to_string()).collect();
+        let missing = entry.missing_env().iter().map(|var| format!("${var}")).collect();
+        self.install_server("mcp preset", server, missing);
+    }
+
+    /// Add an MCP server to the selected agent and say what it still needs.
+    ///
+    /// The registry and the built-in presets both land here. Both know which
+    /// environment variables a server wants and neither can know their values,
+    /// and a server missing one starts perfectly well and then fails on its
+    /// first call — which is exactly the failure the warning exists to pre-empt.
+    /// Like the CLI, this warns rather than refusing: the server is still worth
+    /// having in the config while you go and set the variable.
+    fn install_server(&mut self, what: &str, server: mcp::Server, missing: Vec<String>) {
         let name = server.name.clone();
         let reported = name.clone();
         let agent_id = self.agent().map(|a| a.id.clone()).unwrap_or_default();
 
-        self.apply("mcp preset", move |config| {
+        self.apply(what, move |config| {
             config.upsert_mcp(&server)?;
             Ok(format!("added {reported}"))
         });
 
         self.mcp_health.forget(&agent_id, &name);
-        // The server will start without these, it just will not work; the CLI
-        // warns the same way rather than refusing.
-        if !missing.is_empty() && self.status.tone == Tone::Good {
-            self.say(Tone::Info, format!("added {name}, but ${} is not set", missing.join(", $")));
+        // Only worth saying if the write itself succeeded; otherwise the failure
+        // is the news.
+        if self.status.tone == Tone::Good {
+            if let Some(note) = missing_note(&name, &missing) {
+                self.say(Tone::Warn, note);
+            }
         }
         self.select_server(&name);
     }
@@ -2901,6 +3031,7 @@ impl App {
                 scroll_key(key, scroll).map(|scroll| Overlay::SkillDetail { scroll })
             }
             Overlay::SkillCopy(picker) => self.skill_copy_key(key, picker),
+            Overlay::Registry(picker) => self.registry_key(key, raw, picker),
             Overlay::Report(report) => scroll_key(key, report.scroll)
                 .map(|scroll| Overlay::Report(Report { scroll, ..report })),
         };
@@ -2979,6 +3110,45 @@ impl App {
             _ => {}
         }
         Some(Overlay::Models(picker))
+    }
+
+    fn registry_key(
+        &mut self,
+        key: KeyEvent,
+        raw: KeyEvent,
+        mut picker: RegistryPicker,
+    ) -> Option<Overlay> {
+        // Asking the registry again is a round trip, so it is its own key rather
+        // than something typing sets off.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            let query = picker.query.clone();
+            self.schedule(Job::Registry(query), "searching the MCP registry...");
+            return Some(Overlay::Registry(picker));
+        }
+
+        match key.code {
+            KeyCode::Esc => return None,
+            KeyCode::Enter => {
+                if let Some(entry) = picker.selected().cloned() {
+                    self.install_registry(&entry);
+                }
+                return None;
+            }
+            KeyCode::Up => picker.cursor.step(-1, picker.matches.len()),
+            KeyCode::Down => picker.cursor.step(1, picker.matches.len()),
+            KeyCode::Backspace => {
+                picker.query.pop();
+                picker.rebuild();
+            }
+            KeyCode::Char(_) => {
+                if let KeyCode::Char(typed) = raw.code {
+                    picker.query.push(typed);
+                    picker.rebuild();
+                }
+            }
+            _ => {}
+        }
+        Some(Overlay::Registry(picker))
     }
 
     fn form_key(&mut self, key: KeyEvent, raw: KeyEvent, mut form: Form) -> Option<Overlay> {
@@ -3352,6 +3522,11 @@ impl App {
                 hits.overlay_rows = rows;
             }
             Some(Overlay::Report(report)) => hits.overlay = Some(render_report(frame, report)),
+            Some(Overlay::Registry(picker)) => {
+                let (area, rows) = render_registry(frame, picker);
+                hits.overlay = Some(area);
+                hits.overlay_rows = rows;
+            }
             None => {}
         }
         hits
@@ -3495,6 +3670,13 @@ impl App {
                 Hint::plain("enter", "run"),
                 Hint::plain("esc", "close"),
             ],
+            Some(Overlay::Registry(_)) => vec![
+                Hint::plain("type", "filter"),
+                Hint::plain("ctrl+r", "search registry"),
+                Hint::plain("arrows", "move"),
+                Hint::plain("enter", "install"),
+                Hint::plain("esc", "cancel"),
+            ],
             Some(Overlay::Models(_)) => vec![
                 Hint::plain("type", "filter"),
                 Hint::plain("↑↓", "move"),
@@ -3546,6 +3728,7 @@ impl App {
                         Action::McpDelete,
                         Action::McpCheck,
                         Action::McpPreset(None),
+                        Action::Registry,
                         Action::Palette,
                         Action::Help,
                     ]),
@@ -4130,6 +4313,35 @@ impl App {
                 .collect()
         })
     }
+}
+
+fn render_registry(frame: &mut Frame, picker: &RegistryPicker) -> (Rect, RowsAt) {
+    let search = Search {
+        title: "mcp registry",
+        query: &picker.query,
+        placeholder: "type to filter these, ctrl+r to ask the registry again",
+        empty: "nothing fetched matches that; ctrl+r asks the registry",
+        count: picker.matches.len(),
+        selected: picker.cursor.index(),
+    };
+
+    render_search_overlay(frame, search, |width| {
+        let columns = Columns::flexible(width, &[30, 24], 2, 18);
+        picker
+            .matches
+            .iter()
+            .filter_map(|index| picker.entries.get(*index))
+            .map(|entry| {
+                let mut row = Row::default();
+                row.cell(&columns, &entry.name, Style::default().fg(palette::TEXT));
+                row.cell(&columns, &launch_summary(entry), Style::default().fg(palette::MUTED));
+                row.cell(&columns, &entry.description, Style::default().fg(palette::FAINT));
+                // Nothing this program can start is nothing worth choosing.
+                row.dim = entry.preferred().is_none();
+                row
+            })
+            .collect()
+    })
 }
 
 fn render_models(frame: &mut Frame, picker: &ModelPicker) -> (Rect, RowsAt) {
@@ -4936,6 +5148,12 @@ mod render_tests {
 
     /// A fixed two-agent scene, so a render test does not depend on what happens
     /// to be installed on the machine running it.
+    ///
+    /// The agents are a fixture but their ids are real, and [`App::apply`]
+    /// resolves an id against the machine rather than against this list. Any
+    /// test that reaches a write — `apply`, `install_server`, `save_form`, a
+    /// confirmed delete — therefore edits the real config of whoever is running
+    /// the suite. Test the pure part instead, or use an id nothing resolves.
     fn scene() -> App {
         let mut codex = AgentEntry {
             id: "codex".into(),
@@ -5531,6 +5749,154 @@ mod render_tests {
 
         assert!(matches!(app.pending, Some(Job::EditConfig)), "not scheduled as a job");
         assert!(app.status.text.contains("$EDITOR"), "unannounced: {:?}", app.status.text);
+    }
+
+    /// Registry entries of every shape the picker has to draw.
+    fn registry_entries() -> Vec<registry::Entry> {
+        vec![
+            registry::Entry {
+                name: "io.github.example/filesystem".into(),
+                title: Some("Filesystem".into()),
+                description: "Read and write files".into(),
+                version: Some("1.2.0".into()),
+                options: vec![registry::Launch::Package {
+                    runtime: "npx".into(),
+                    args: vec!["-y".into(), "server-filesystem@0.1.2".into()],
+                    env: vec![
+                        registry::EnvVar {
+                            name: "CONFAI_TEST_ROOT".into(),
+                            description: Some("Where to serve from".into()),
+                            required: true,
+                            secret: false,
+                        },
+                        registry::EnvVar {
+                            name: "CONFAI_TEST_TOKEN".into(),
+                            description: None,
+                            required: true,
+                            secret: true,
+                        },
+                    ],
+                }],
+            },
+            registry::Entry {
+                name: "ac.example/hosted".into(),
+                title: None,
+                description: "Hosted".into(),
+                version: None,
+                options: vec![registry::Launch::Remote {
+                    url: "https://mcp.example.invalid/mcp".into(),
+                }],
+            },
+            registry::Entry {
+                name: "com.example/container".into(),
+                title: None,
+                description: "Container only".into(),
+                version: None,
+                options: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_registry_row_says_how_the_server_would_be_started() {
+        let entries = registry_entries();
+        assert_eq!(launch_summary(&entries[0]), "npx -y server-filesystem@0.1.2");
+        assert_eq!(launch_summary(&entries[1]), "https://mcp.example.invalid/mcp");
+        // Nothing this program can start, and the row says so rather than lying.
+        assert_eq!(launch_summary(&entries[2]), "nothing installable");
+    }
+
+    #[test]
+    fn the_variables_an_entry_needs_are_reported_with_secrets_marked() {
+        // Neither is set in the test process, and both are required.
+        let missing = missing_env_of(&registry_entries()[0]);
+        assert_eq!(missing, ["$CONFAI_TEST_ROOT", "$CONFAI_TEST_TOKEN (a secret)"]);
+
+        // A remote server asks for nothing.
+        assert!(missing_env_of(&registry_entries()[1]).is_empty());
+    }
+
+    #[test]
+    fn typing_in_the_registry_picker_filters_what_was_already_fetched() {
+        let mut picker = RegistryPicker::new(String::new(), registry_entries());
+        assert_eq!(picker.matches.len(), 3);
+
+        picker.query.push_str("hosted");
+        picker.rebuild();
+        assert_eq!(picker.matches.len(), 1);
+        assert_eq!(picker.selected().map(|entry| entry.name.as_str()), Some("ac.example/hosted"));
+
+        picker.query.push_str("-no-such-thing");
+        picker.rebuild();
+        assert!(picker.matches.is_empty());
+        assert!(picker.selected().is_none(), "a cursor left pointing at a gone row");
+    }
+
+    #[test]
+    fn the_registry_search_is_announced_before_it_reaches_the_network() {
+        let mut app = scene();
+        app.lens = Lens::Mcp;
+        app.dispatch(Action::Registry);
+
+        let Some(Job::Registry(query)) = &app.pending else {
+            panic!("the registry search was not scheduled as a job: {:?}", app.pending)
+        };
+        assert!(query.is_empty(), "the first search lists whatever the registry returns first");
+        assert!(app.status.text.contains("registry"), "unannounced: {:?}", app.status.text);
+    }
+
+    #[test]
+    fn an_agent_that_stores_no_mcp_servers_is_not_offered_the_registry() {
+        let mut app = scene();
+        app.agents[0].capabilities.mcp = false;
+
+        let refusal = Action::Registry.unavailable(&app).expect("the registry was offered anyway");
+        assert!(refusal.contains("does not store MCP servers"), "{refusal}");
+    }
+
+    #[test]
+    fn an_install_warns_about_the_variables_it_could_not_set() {
+        let missing = missing_env_of(&registry_entries()[0]);
+        let note =
+            missing_note("filesystem", &missing).expect("no warning for a server needing two");
+
+        assert!(note.starts_with("added filesystem"), "{note}");
+        assert!(note.contains("$CONFAI_TEST_ROOT"), "{note}");
+        // A credential is called out as one: the registry knows, the user acts.
+        assert!(note.contains("$CONFAI_TEST_TOKEN (a secret)"), "{note}");
+
+        // A server that needs nothing is not worth a line about it.
+        assert_eq!(missing_note("hosted", &[]), None);
+    }
+
+    #[test]
+    fn an_entry_with_nothing_runnable_never_reaches_the_config() {
+        let mut app = scene();
+        app.lens = Lens::Mcp;
+        // Refused before any write is attempted, so this touches no config.
+        app.install_registry(&registry_entries()[2]);
+
+        assert_eq!(app.status.tone, Tone::Bad);
+        assert!(app.status.text.contains("lists no way to run it"), "{:?}", app.status.text);
+    }
+
+    #[test]
+    fn the_registry_picker_draws_its_rows_and_offers_the_way_back_out() {
+        let mut app = scene();
+        app.lens = Lens::Mcp;
+        app.overlay =
+            Some(Overlay::Registry(RegistryPicker::new(String::new(), registry_entries())));
+
+        let text = screen(&mut app, 120, 30);
+        assert!(text.contains("mcp registry"), "no title:\n{text}");
+        assert!(text.contains("io.github.example/filesystem"), "no rows:\n{text}");
+        // Truncated to its column, so match the head of it rather than the whole.
+        assert!(text.contains("npx -y server-filesyste"), "no launch summary:\n{text}");
+        assert!(text.contains("nothing installable"), "an unrunnable entry is unmarked:\n{text}");
+        // Both jobs of the query line are on screen, since one of them costs a
+        // request and the user has to know which.
+        assert!(text.contains("ctrl+r search registry"), "no way to re-query:\n{text}");
+        assert!(text.contains("enter install"), "no way to install:\n{text}");
     }
 
     /// The skills pane, on the agent that has any.
