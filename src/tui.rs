@@ -5154,14 +5154,15 @@ mod render_tests {
     /// A fixed two-agent scene, so a render test does not depend on what happens
     /// to be installed on the machine running it.
     ///
-    /// The agents are a fixture but their ids are real, and [`App::apply`]
-    /// resolves an id against the machine rather than against this list. Any
-    /// test that reaches a write — `apply`, `install_server`, `save_form`, a
-    /// confirmed delete — therefore edits the real config of whoever is running
-    /// the suite. Test the pure part instead, or use an id nothing resolves.
+    /// The ids deliberately resolve to nothing. [`App::apply`] looks an id up
+    /// against the machine rather than against this list, so a fixture carrying
+    /// a real id would let any test that reaches a write edit the config of
+    /// whoever is running the suite — which happened once. With these ids
+    /// `agent::find` fails and the write is refused, and
+    /// `a_write_from_the_fixture_cannot_reach_a_real_config` holds that line.
     fn scene() -> App {
         let mut codex = AgentEntry {
-            id: "codex".into(),
+            id: "codex.fixture".into(),
             name: "Codex".into(),
             detection: Detection { binary_on_path: true, config_exists: true },
             capabilities: Capabilities {
@@ -5207,7 +5208,7 @@ mod render_tests {
         }
 
         let opencode = AgentEntry {
-            id: "opencode".into(),
+            id: "opencode.fixture".into(),
             name: "opencode".into(),
             detection: Detection { binary_on_path: false, config_exists: true },
             capabilities: Capabilities {
@@ -5299,6 +5300,28 @@ mod render_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The guard, not the comment, is what stops this happening again.
+    ///
+    /// A fixture carrying a real agent id once let a test write an MCP server
+    /// into the config of the machine running the suite. `apply` resolves ids
+    /// against the machine, so the fixture's ids must resolve to nothing.
+    #[test]
+    fn a_write_from_the_fixture_cannot_reach_a_real_config() {
+        for entry in scene().agents {
+            assert!(
+                crate::agent::find(&entry.id).is_err(),
+                "fixture agent {:?} resolves to a real agent, so a test that writes \
+                 would edit that agent's config",
+                entry.id
+            );
+        }
+
+        // And the write path itself refuses rather than silently doing nothing.
+        let mut app = scene();
+        app.apply("test", |_| Ok("should never run".into()));
+        assert_eq!(app.status.tone, Tone::Bad, "a fixture write reported success");
     }
 
     #[test]
@@ -5701,8 +5724,9 @@ mod render_tests {
     #[test]
     fn undoing_an_agent_with_no_backup_is_not_an_error() {
         let mut app = scene();
-        // scene() points at paths that do not exist, so no backup does either.
-        app.undo("codex");
+        // Unlike `apply`, `undo` takes the path from the fixture rather than
+        // resolving the id against the machine, so this stays off real files.
+        app.undo("codex.fixture");
 
         assert_eq!(app.status.tone, Tone::Info, "a missing backup reported as a failure");
         assert!(app.status.text.contains("nothing to undo"), "{:?}", app.status.text);

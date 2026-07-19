@@ -1376,7 +1376,7 @@ fn update() -> Result<()> {
 /// ConfAI does not replace its own binary: the installers and `cargo` already
 /// do it properly, and a tool that rewrites itself while holding a user's
 /// credentials open is a worse trade than printing one line.
-fn upgrade_commands() -> Vec<String> {
+pub(crate) fn upgrade_commands() -> Vec<String> {
     // The installers are release assets, so `releases/latest/download/` always
     // resolves to the newest one. There is no vanity domain serving them, and
     // pointing at one that does not exist is worse than being verbose.
