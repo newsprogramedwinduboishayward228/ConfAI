@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/redstone-md/ConfAI/releases/tag/v0.0.3) - 2026-07-19
+
+### Features
+
+- Skills as a third lens in the interactive view ([`143d88b`](https://github.com/redstone-md/ConfAI/commit/143d88b096f89a64b67d2a5ecb215c10fba8ab2f))
+- MCP in the interactive view, and skill management ([`b3405ed`](https://github.com/redstone-md/ConfAI/commit/b3405ed360c48e788add807856c360635c5a5b36))
+
+### Fixes
+
+- Point the upgrade hint at installers that exist ([`63155ee`](https://github.com/redstone-md/ConfAI/commit/63155eeb4600b16370335392aeadbb3013702086))
+
+### Documentation
+
+- MCP, skills and the three-lens key map, in six languages ([`8a0aa09`](https://github.com/redstone-md/ConfAI/commit/8a0aa09a9f7c0827791ce421c1ab5263c8b7e984))
+
+Full changelog: [v0.0.2...v0.0.3](https://github.com/redstone-md/ConfAI/compare/v0.0.2...v0.0.3)
+
+
+
 ## [0.0.2](https://github.com/redstone-md/ConfAI/releases/tag/v0.0.2) - 2026-07-18
 
 ### Features
