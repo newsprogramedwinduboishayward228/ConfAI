@@ -4550,8 +4550,13 @@ fn render_about(frame: &mut Frame, scroll: u16) -> Rect {
     let bindings = |actions: Vec<Action>| -> Vec<(String, String)> {
         actions
             .iter()
-            .filter_map(|action| {
-                action.binding().map(|key| (key.to_string(), action.description()))
+            .map(|action| {
+                // An action with no key of its own is still something the program
+                // does, so it is listed with the way to reach it rather than
+                // left off the only complete map of what exists.
+                let key =
+                    action.binding().map(str::to_string).unwrap_or_else(|| "(commands)".into());
+                (key, action.description())
             })
             .collect()
     };
@@ -5897,6 +5902,51 @@ mod render_tests {
         // request and the user has to know which.
         assert!(text.contains("ctrl+r search registry"), "no way to re-query:\n{text}");
         assert!(text.contains("enter install"), "no way to install:\n{text}");
+    }
+
+    #[test]
+    fn everything_the_cli_can_do_is_reachable_from_the_palette() {
+        let app = scene();
+        let catalogue = Action::catalogue(&app);
+
+        // The five the CLI had and this view did not.
+        for action in
+            [Action::Registry, Action::Undo, Action::Doctor, Action::Update, Action::EditConfig]
+        {
+            assert!(
+                catalogue.contains(&action),
+                "{:?} cannot be found by searching for it",
+                action.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_screen_lists_an_action_that_has_no_key_of_its_own() {
+        let mut app = scene();
+        app.dispatch(Action::Help);
+        let text = screen(&mut app, 100, 60);
+
+        // Every new action is on the one complete map of what the program does.
+        for expected in ["$EDITOR", "restore this agent's config", "check every config parses"] {
+            assert!(text.contains(expected), "{expected:?} missing from the help:\n{text}");
+        }
+        // Reachable without a binding, and said so rather than left out.
+        assert!(text.contains("(commands)"), "a keyless action was dropped:\n{text}");
+        assert!(text.contains("newer release"), "update missing from the help:\n{text}");
+    }
+
+    #[test]
+    fn the_registry_is_offered_only_where_mcp_servers_live() {
+        let mut app = scene();
+        app.lens = Lens::Mcp;
+        app.focus = Pane::Providers;
+        let mcp = screen(&mut app, 150, 30);
+        assert!(mcp.contains("g registry"), "no registry hint on the mcp lens:\n{mcp}");
+
+        app.lens = Lens::Providers;
+        let providers = screen(&mut app, 150, 30);
+        assert!(!providers.contains("g registry"), "registry offered on providers:\n{providers}");
     }
 
     /// The skills pane, on the agent that has any.
