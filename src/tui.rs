@@ -89,6 +89,9 @@ const DOT_HOLLOW: &str = "○";
 const DOT_HALF: &str = "◐";
 /// The nothing-recorded placeholder, distinct from a literal empty string.
 const ABSENT: &str = "—";
+/// Between the lens tabs in a pane title. A rule rather than the `·` the rest of
+/// the title joins with, so a tab boundary is not read as part of a name.
+const TAB_SEPARATOR: &str = " │ ";
 
 /// Below this many rows the header collapses to one line.
 const COMPACT_HEIGHT: u16 = 30;
@@ -338,6 +341,43 @@ fn next_lens(from: Lens, mcp: bool, skills: bool) -> Lens {
         .map(|step| LENSES[(at + step) % LENSES.len()])
         .find(|lens| lens_supported(*lens, mcp, skills))
         .unwrap_or(Lens::Providers)
+}
+
+/// How many rows a lens would show for this agent, before any filter. This is
+/// what a tab counts: the point of the tabs is to see that an agent runs three
+/// MCP servers without having to switch to look.
+fn lens_total(agent: &AgentEntry, lens: Lens) -> usize {
+    match lens {
+        Lens::Providers => agent.providers.len(),
+        Lens::Mcp => agent.mcp.len(),
+        Lens::Skills => agent.skills.len(),
+    }
+}
+
+/// One tab per lens this agent actually has, or `None` when it has only the one
+/// and there is nothing to offer a choice between.
+///
+/// A lens the agent has no facility for is left out rather than greyed: a tab
+/// that cannot be selected is a dead target, and the cycle skips it too.
+fn lens_tabs(agent: &AgentEntry, active: Lens) -> Option<PaneTitle> {
+    let offered: Vec<Lens> = LENSES
+        .into_iter()
+        .filter(|lens| lens_supported(*lens, agent.capabilities.mcp, agent.skills_dir.is_some()))
+        .collect();
+    if offered.len() < 2 {
+        return None;
+    }
+
+    let mut title = PaneTitle::plain(format!("{} ·", agent.name));
+    for (index, lens) in offered.into_iter().enumerate() {
+        title.push(TitleRole::Separator, if index == 0 { " " } else { TAB_SEPARATOR }, None);
+        title.push(
+            if lens == active { TitleRole::Active } else { TitleRole::Inactive },
+            format!("{} {}", lens.label(), lens_total(agent, lens)),
+            Some(lens),
+        );
+    }
+    Some(title)
 }
 
 /// A case-insensitive substring filter over the provider list.
@@ -1455,7 +1495,9 @@ struct Hits {
     provider_rows: RowsAt,
     overlay: Option<Rect>,
     overlay_rows: RowsAt,
-    hints: Vec<(Rect, Action)>,
+    /// Every rect that dispatches when clicked: the hint bar, and the lens tabs
+    /// in the right pane's title.
+    clicks: Vec<(Rect, Action)>,
 }
 
 struct App {
@@ -1826,8 +1868,8 @@ impl App {
             return;
         }
 
-        let hint = self.hits.hints.iter().find(|(rect, _)| rect.contains(at));
-        if let Some((_, action)) = hint {
+        let clicked = self.hits.clicks.iter().find(|(rect, _)| rect.contains(at));
+        if let Some((_, action)) = clicked {
             let action = action.clone();
             self.dispatch(action);
             return;
@@ -2879,11 +2921,14 @@ impl App {
             Layout::horizontal([Constraint::Length(AGENT_PANE_WIDTH), Constraint::Min(24)])
                 .areas(body);
 
+        let left_at = self.agent_pane(left).render(frame, left);
+        let right_at = self.right_pane(right).render(frame, right);
         let mut hits = Hits {
             agents: left,
             providers: right,
-            agent_rows: self.agent_pane(left).render(frame, left),
-            provider_rows: self.right_pane(right).render(frame, right),
+            agent_rows: left_at.rows,
+            provider_rows: right_at.rows,
+            clicks: right_at.clicks,
             ..Hits::default()
         };
 
@@ -2894,7 +2939,7 @@ impl App {
             ])),
             status,
         );
-        hits.hints = self.render_hints(frame, hints);
+        hits.clicks.extend(self.render_hints(frame, hints));
 
         match &self.overlay {
             Some(Overlay::About { scroll }) => hits.overlay = Some(render_about(frame, *scroll)),
@@ -3170,7 +3215,7 @@ impl App {
             .collect();
 
         ListPane {
-            title: format!("agents {}", self.agents.len()),
+            title: format!("agents {}", self.agents.len()).into(),
             focused: self.focus == Pane::Agents,
             header: Some(columns.header(&["", "agent", "prv", ""])),
             rows,
@@ -3188,19 +3233,34 @@ impl App {
         }
     }
 
-    /// ` Codex · providers 11 `, carrying the filter clause when one is live.
-    fn pane_title(&self, agent: &AgentEntry, lens: Lens, shown: usize, total: usize) -> String {
+    /// ` Codex · providers 11 │ mcp 3 `: the agent, then one tab per lens it has,
+    /// with the one in force picked out and the others a click away.
+    ///
+    /// Falls back to ` Codex · providers 11 ` when the tabs would be cut, and
+    /// carries the filter clause instead when one is live.
+    fn pane_title(
+        &self,
+        agent: &AgentEntry,
+        lens: Lens,
+        shown: usize,
+        total: usize,
+        pane_width: u16,
+    ) -> PaneTitle {
+        // While you are filtering, the query is what the line is for; tabs would
+        // crowd it off the end of a title that has to fit either way.
         if self.filter.active() || self.filter.editing {
-            format!(
+            return PaneTitle::plain(format!(
                 "{} · {} {shown}/{total} · /{}{}",
                 agent.name,
                 lens.label(),
                 self.filter.query,
                 if self.filter.editing { CURSOR_BAR } else { "" }
-            )
-        } else {
-            format!("{} · {} {total}", agent.name, lens.label())
+            ));
         }
+
+        lens_tabs(agent, lens).filter(|tabs| tabs.fits(pane_width)).unwrap_or_else(|| {
+            PaneTitle::plain(format!("{} · {} {total}", agent.name, lens.label()))
+        })
     }
 
     fn provider_pane(&self, area: Rect) -> ListPane {
@@ -3210,7 +3270,7 @@ impl App {
         };
         if let Some(err) = &agent.error {
             return ListPane::notice(
-                &format!("{} · providers", agent.name),
+                format!("{} · providers", agent.name),
                 focused,
                 vec![err.clone()],
             );
@@ -3218,11 +3278,11 @@ impl App {
 
         let total = agent.providers.len();
         let visible = self.visible_providers();
-        let title = self.pane_title(agent, Lens::Providers, visible.len(), total);
+        let title = self.pane_title(agent, Lens::Providers, visible.len(), total, area.width);
 
         if total == 0 {
             return ListPane::notice(
-                &title,
+                title.clone(),
                 focused,
                 vec![
                     format!("{} knows no providers yet", agent.name),
@@ -3233,7 +3293,7 @@ impl App {
         }
         if visible.is_empty() {
             return ListPane::notice(
-                &title,
+                title.clone(),
                 focused,
                 vec![
                     format!("nothing matches \"{}\"", self.filter.query.trim()),
@@ -3313,16 +3373,16 @@ impl App {
             return ListPane::notice("mcp", focused, vec!["no agent selected".to_string()]);
         };
         if let Some(err) = &agent.error {
-            return ListPane::notice(&format!("{} · mcp", agent.name), focused, vec![err.clone()]);
+            return ListPane::notice(format!("{} · mcp", agent.name), focused, vec![err.clone()]);
         }
 
         let total = agent.mcp.len();
         let visible = self.visible_servers();
-        let title = self.pane_title(agent, Lens::Mcp, visible.len(), total);
+        let title = self.pane_title(agent, Lens::Mcp, visible.len(), total, area.width);
 
         if total == 0 {
             return ListPane::notice(
-                &title,
+                title.clone(),
                 focused,
                 vec![
                     format!("{} launches no MCP servers yet", agent.name),
@@ -3333,7 +3393,7 @@ impl App {
         }
         if visible.is_empty() {
             return ListPane::notice(
-                &title,
+                title.clone(),
                 focused,
                 vec![
                     format!("nothing matches \"{}\"", self.filter.query.trim()),
@@ -3402,7 +3462,7 @@ impl App {
         };
         let Some(dir) = &agent.skills_dir else {
             return ListPane::notice(
-                &format!("{} · skills", agent.name),
+                format!("{} · skills", agent.name),
                 focused,
                 vec![format!("{} does not keep skills", agent.name)],
             );
@@ -3410,11 +3470,11 @@ impl App {
 
         let total = agent.skills.len();
         let visible = self.visible_skills();
-        let title = self.pane_title(agent, Lens::Skills, visible.len(), total);
+        let title = self.pane_title(agent, Lens::Skills, visible.len(), total, area.width);
 
         if total == 0 {
             return ListPane::notice(
-                &title,
+                title.clone(),
                 focused,
                 vec![
                     format!("{} has no skills installed", agent.name),
@@ -3429,7 +3489,7 @@ impl App {
         }
         if visible.is_empty() {
             return ListPane::notice(
-                &title,
+                title.clone(),
                 focused,
                 vec![
                     format!("nothing matches \"{}\"", self.filter.query.trim()),
@@ -4011,7 +4071,7 @@ fn render_presets(frame: &mut Frame, picker: &PresetPicker) -> (Rect, RowsAt) {
         .collect();
 
     let rows_at = ListPane {
-        title: format!("presets {}", picker.presets.len()),
+        title: format!("presets {}", picker.presets.len()).into(),
         focused: true,
         header: Some(columns.header(&["preset", "name", "base url"])),
         rows,
@@ -4044,7 +4104,7 @@ fn render_mcp_presets(frame: &mut Frame, picker: &McpPresetPicker) -> (Rect, Row
         .collect();
 
     let rows_at = ListPane {
-        title: format!("mcp presets {}", picker.presets.len()),
+        title: format!("mcp presets {}", picker.presets.len()).into(),
         focused: true,
         header: Some(columns.header(&["preset", "command or url", "what it does"])),
         rows,
@@ -4076,7 +4136,7 @@ fn render_skill_copy(frame: &mut Frame, picker: &SkillCopyPicker) -> (Rect, Rows
         .collect();
 
     let rows_at = ListPane {
-        title: format!("copy {} to", picker.skill),
+        title: format!("copy {} to", picker.skill).into(),
         focused: true,
         header: Some(columns.header(&["agent", "lands at"])),
         rows,
@@ -4168,10 +4228,116 @@ fn render_rows(
     RowsAt { area, offset: state.offset() }
 }
 
+/// How one run of a pane title is coloured.
+///
+/// Chrome follows the pane's focus, as the whole title did before the lens grew
+/// tabs. The tab roles are fixed instead, so which lens is in force reads the
+/// same whether or not the pane holds the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitleRole {
+    Chrome,
+    Active,
+    Inactive,
+    Separator,
+}
+
+#[derive(Debug, Clone)]
+struct TitlePart {
+    text: String,
+    role: TitleRole,
+    /// The lens this run stands for, when it is a tab.
+    lens: Option<Lens>,
+}
+
+/// A pane title, kept in runs so the lens tabs can be coloured and hit-tested
+/// apart from the rest of the line.
+#[derive(Debug, Default, Clone)]
+struct PaneTitle {
+    parts: Vec<TitlePart>,
+}
+
+impl PaneTitle {
+    fn plain(text: impl Into<String>) -> Self {
+        Self { parts: vec![TitlePart { text: text.into(), role: TitleRole::Chrome, lens: None }] }
+    }
+
+    fn push(&mut self, role: TitleRole, text: impl Into<String>, lens: Option<Lens>) {
+        self.parts.push(TitlePart { text: text.into(), role, lens });
+    }
+
+    /// Columns the title occupies, counting the space it is padded with on each
+    /// side so the border does not run into the words.
+    fn width(&self) -> u16 {
+        let text: usize = self.parts.iter().map(|part| part.text.chars().count()).sum();
+        (text + 2) as u16
+    }
+
+    /// Whether a pane this wide can draw the title whole. A title lives on the
+    /// top border, between two rounded corners it may not overwrite.
+    fn fits(&self, pane_width: u16) -> bool {
+        self.width() <= pane_width.saturating_sub(2)
+    }
+
+    fn line(&self, chrome: Style) -> Line<'static> {
+        let mut spans = vec![Span::styled(" ", chrome)];
+        spans.extend(self.parts.iter().map(|part| {
+            let style = match part.role {
+                TitleRole::Chrome => chrome,
+                TitleRole::Active => {
+                    Style::default().fg(palette::ACCENT).add_modifier(Modifier::BOLD)
+                }
+                TitleRole::Inactive => Style::default().fg(palette::MUTED),
+                TitleRole::Separator => Style::default().fg(palette::FAINT),
+            };
+            Span::styled(part.text.clone(), style)
+        }));
+        spans.push(Span::styled(" ", chrome));
+        Line::from(spans)
+    }
+
+    /// Where each selectable tab landed on the pane's top border.
+    ///
+    /// The active tab is left out: clicking the lens you are already reading
+    /// should not move the focus or clear anything.
+    fn tabs_at(&self, area: Rect) -> Vec<(Rect, Action)> {
+        // Past the left corner, then past the pad [`Self::line`] opens with.
+        let mut x = area.x + 2;
+        let mut tabs = Vec::new();
+        for part in &self.parts {
+            let width = part.text.chars().count() as u16;
+            if let (TitleRole::Inactive, Some(lens)) = (part.role, part.lens) {
+                tabs.push((Rect { x, y: area.y, width, height: 1 }, Action::Lens(Some(lens))));
+            }
+            x += width;
+        }
+        tabs
+    }
+}
+
+impl From<&str> for PaneTitle {
+    fn from(text: &str) -> Self {
+        Self::plain(text)
+    }
+}
+
+impl From<String> for PaneTitle {
+    fn from(text: String) -> Self {
+        Self::plain(text)
+    }
+}
+
+/// What a rendered pane left behind for the mouse.
+#[derive(Debug, Default)]
+struct PaneAt {
+    rows: RowsAt,
+    /// Rects that dispatch when clicked; only the lens tabs, so far.
+    clicks: Vec<(Rect, Action)>,
+}
+
 /// A bordered, scrolling list with a column header and an empty state. Every
 /// list in the app is this shape.
 struct ListPane {
-    title: String,
+    title: PaneTitle,
     focused: bool,
     header: Option<Line<'static>>,
     rows: Vec<Row>,
@@ -4181,28 +4347,22 @@ struct ListPane {
 }
 
 impl ListPane {
-    fn notice(title: &str, focused: bool, empty: Vec<String>) -> Self {
-        Self {
-            title: title.to_string(),
-            focused,
-            header: None,
-            rows: Vec::new(),
-            selected: 0,
-            empty,
-        }
+    fn notice(title: impl Into<PaneTitle>, focused: bool, empty: Vec<String>) -> Self {
+        Self { title: title.into(), focused, header: None, rows: Vec::new(), selected: 0, empty }
     }
 
-    fn render(self, frame: &mut Frame, area: Rect) -> RowsAt {
-        let (border, title) = if self.focused {
+    fn render(self, frame: &mut Frame, area: Rect) -> PaneAt {
+        let (border, chrome) = if self.focused {
             (palette::ACCENT, Style::default().fg(palette::ACCENT).add_modifier(Modifier::BOLD))
         } else {
             (palette::FAINT, Style::default().fg(palette::MUTED))
         };
+        let clicks = self.title.tabs_at(area);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
-            .title(Span::styled(format!(" {} ", self.title), title));
-        self.fill(frame, area, block)
+            .title(self.title.line(chrome));
+        PaneAt { rows: self.fill(frame, area, block), clicks }
     }
 
     /// The same pane wearing an overlay's chrome rather than a pane border.
@@ -4211,10 +4371,9 @@ impl ListPane {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(palette::ACCENT))
-            .title(Span::styled(
-                format!(" {} ", self.title),
-                Style::default().fg(palette::ACCENT).add_modifier(Modifier::BOLD),
-            ))
+            .title(
+                self.title.line(Style::default().fg(palette::ACCENT).add_modifier(Modifier::BOLD)),
+            )
             .style(Style::default().bg(palette::OVERLAY_BG).fg(palette::TEXT));
         self.fill(frame, area, block)
     }
@@ -4359,6 +4518,8 @@ fn centered_fixed(area: Rect, width: u16, height: u16) -> Rect {
 mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use ratatui::Terminal;
 
     /// A fixed two-agent scene, so a render test does not depend on what happens
@@ -4480,16 +4641,19 @@ mod render_tests {
         )
     }
 
+    /// Render one frame the way [`App::draw`] does — remembering where
+    /// everything landed — and hand back the cells for inspection.
+    fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+        let mut hits = Hits::default();
+        terminal.draw(|frame| hits = app.render(frame)).expect("draw");
+        app.hits = hits;
+        terminal.backend().buffer().clone()
+    }
+
     /// Render one frame and return it as text, so a failure shows the screen.
     fn screen(app: &mut App, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
-        terminal
-            .draw(|frame| {
-                app.render(frame);
-            })
-            .expect("draw");
-
-        let buffer = terminal.backend().buffer().clone();
+        let buffer = draw(app, width, height);
         (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
@@ -4598,6 +4762,143 @@ mod render_tests {
         assert_eq!(app.lens(), Lens::Skills);
         app.dispatch(Action::Lens(None));
         assert_eq!(app.lens(), Lens::Providers);
+    }
+
+    /// The right pane's top border, run by run, with the colour and weight each
+    /// run was drawn in: what tells an active tab from an inactive one.
+    fn title_runs(app: &mut App, width: u16, height: u16) -> Vec<(String, Color, bool)> {
+        let buffer = draw(app, width, height);
+        let pane = app.hits.providers;
+        let mut runs: Vec<(String, Color, bool)> = Vec::new();
+        for x in (pane.x + 1)..pane.right().saturating_sub(1) {
+            let cell = &buffer[(x, pane.y)];
+            let bold = cell.modifier.contains(Modifier::BOLD);
+            match runs.last_mut() {
+                Some((text, colour, weight)) if *colour == cell.fg && *weight == bold => {
+                    text.push_str(cell.symbol())
+                }
+                _ => runs.push((cell.symbol().to_string(), cell.fg, bold)),
+            }
+        }
+        runs
+    }
+
+    /// What the tabs of a title read, in order.
+    fn tab_labels(title: &PaneTitle) -> Vec<String> {
+        title
+            .parts
+            .iter()
+            .filter(|part| part.lens.is_some())
+            .map(|part| part.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_title_offers_a_tab_for_every_lens_the_agent_has_and_no_others() {
+        let mut app = scene();
+
+        // Codex runs MCP servers but keeps no skills, so it is offered two tabs
+        // rather than three with one greyed out.
+        let codex = lens_tabs(&app.agents[0], Lens::Providers).expect("Codex has two lenses");
+        assert_eq!(tab_labels(&codex), ["providers 3", "mcp 3"]);
+
+        // opencode has all three. A lens counts what it holds even when that is
+        // nothing: an empty list is a fact, an absent tab is a different one.
+        let opencode = lens_tabs(&app.agents[1], Lens::Skills).expect("opencode has three lenses");
+        assert_eq!(tab_labels(&opencode), ["providers 0", "mcp 0", "skills 2"]);
+
+        // One lens is no choice, so there are no tabs to draw at all.
+        app.agents[0].capabilities.mcp = false;
+        assert!(lens_tabs(&app.agents[0], Lens::Providers).is_none());
+    }
+
+    #[test]
+    fn only_the_inactive_tabs_are_click_targets() {
+        let app = scene();
+        let title = lens_tabs(&app.agents[0], Lens::Mcp).expect("Codex has two lenses");
+        let tabs = title.tabs_at(Rect::new(0, 0, 80, 10));
+
+        assert_eq!(tabs.len(), 1, "the lens already in force must not be a target: {tabs:?}");
+        assert_eq!(tabs[0].1, Action::Lens(Some(Lens::Providers)));
+        // Past the corner, the title's pad, "Codex ·" and the space after it.
+        assert_eq!(tabs[0].0.x, 2 + "Codex ·".chars().count() as u16 + 1);
+        assert_eq!(tabs[0].0.width, "providers 3".chars().count() as u16);
+        assert_eq!(tabs[0].0.height, 1, "a tab is one row of the border");
+    }
+
+    #[test]
+    fn clicking_a_tab_jumps_to_that_lens_rather_than_cycling_towards_it() {
+        let mut app = scene();
+        // opencode, the agent with all three lenses, so a jump and a cycle step
+        // land somewhere different.
+        app.agent_cursor = Cursor { index: 1 };
+        draw(&mut app, 120, 30);
+
+        let tab = |app: &App, lens| {
+            app.hits
+                .clicks
+                .iter()
+                .find(|(_, action)| *action == Action::Lens(Some(lens)))
+                .map(|(rect, _)| *rect)
+        };
+
+        let skills = tab(&app, Lens::Skills).expect("no skills tab");
+        app.on_click(Position::new(skills.x, skills.y));
+        assert_eq!(app.lens(), Lens::Skills, "the tab must select, not cycle");
+
+        // Clicking where you already are is not an action.
+        draw(&mut app, 120, 30);
+        assert!(tab(&app, Lens::Skills).is_none(), "the active tab is still clickable");
+        app.on_click(Position::new(skills.right() - 1, skills.y));
+        assert_eq!(app.lens(), Lens::Skills);
+
+        // And the way back is one click, not two.
+        let providers = tab(&app, Lens::Providers).expect("no providers tab");
+        app.on_click(Position::new(providers.x, providers.y));
+        assert_eq!(app.lens(), Lens::Providers);
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_tabs_names_only_the_lens_in_force() {
+        let mut app = scene();
+        // " Codex · providers 3 │ mcp 3 " against the pane's two corners.
+        let tabs = lens_tabs(&app.agents[0], Lens::Providers).expect("Codex has two lenses");
+        assert_eq!(tabs.width(), 29);
+        assert!(!tabs.fits(30), "the tabs must not claim a pane they overflow");
+        assert!(tabs.fits(31));
+
+        let narrow = screen(&mut app, AGENT_PANE_WIDTH + 30, 30);
+        assert!(!narrow.contains("mcp 3"), "tabs drawn into a pane too narrow:\n{narrow}");
+        assert!(narrow.contains("providers 3"), "the fallback names no lens:\n{narrow}");
+
+        let wide = screen(&mut app, AGENT_PANE_WIDTH + 31, 30);
+        assert!(wide.contains("mcp 3"), "the tabs are withheld from a pane that fits:\n{wide}");
+    }
+
+    #[test]
+    fn the_active_tab_reads_differently_from_the_ones_beside_it() {
+        let mut app = scene();
+        app.lens = Lens::Mcp;
+        let runs = title_runs(&mut app, 120, 30);
+
+        let run = |needle: &str| {
+            runs.iter()
+                .find(|(text, ..)| text.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle} in the title: {runs:?}"))
+                .clone()
+        };
+        let (_, active, active_bold) = run("mcp 3");
+        let (_, idle, idle_bold) = run("providers 3");
+
+        assert_eq!(active, palette::ACCENT);
+        assert!(active_bold, "the active tab is not bold");
+        assert_eq!(idle, palette::MUTED);
+        assert!(!idle_bold, "an inactive tab must not compete with the active one");
+
+        // Two tabs, one separator: Codex keeps no skills.
+        let title: String = runs.iter().map(|(text, ..)| text.as_str()).collect();
+        assert_eq!(title.matches(TAB_SEPARATOR.trim()).count(), 1, "not two tabs: {title:?}");
+        assert!(!title.contains("skills"), "a lens Codex does not have: {title:?}");
     }
 
     /// The skills pane, on the agent that has any.
