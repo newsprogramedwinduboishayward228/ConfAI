@@ -37,6 +37,7 @@ use crate::mcp;
 use crate::net::{self, catalog};
 use crate::preset::{self, Preset};
 use crate::skill::{self, Skill};
+use crate::store;
 use crate::ui;
 
 pub fn run() -> Result<()> {
@@ -555,6 +556,8 @@ enum Action {
     Doctor,
     /// Ask now whether a newer release exists.
     Update,
+    /// Put back the config as it was before this program last wrote to it.
+    Undo,
     Palette,
     Help,
     Quit,
@@ -579,6 +582,7 @@ fn menu() -> Vec<Action> {
         Action::Reload,
         Action::Doctor,
         Action::Update,
+        Action::Undo,
         Action::Palette,
         Action::Help,
         Action::Quit,
@@ -645,6 +649,7 @@ impl Action {
             Action::Reload => "reload from disk".into(),
             Action::Doctor => "doctor".into(),
             Action::Update => "check for updates".into(),
+            Action::Undo => "undo the last change".into(),
             Action::Palette => "command palette".into(),
             Action::Help => "help".into(),
             Action::Quit => "quit".into(),
@@ -682,6 +687,7 @@ impl Action {
             Action::Reload => "reload",
             Action::Doctor => "doctor",
             Action::Update => "update",
+            Action::Undo => "undo",
             Action::Palette => "commands",
             Action::Help => "help",
             Action::Quit => "quit",
@@ -729,6 +735,9 @@ impl Action {
             Action::Reload => "re-read every config from disk".into(),
             Action::Doctor => "check every config parses and every selected provider exists".into(),
             Action::Update => "ask whether a newer release of this program exists".into(),
+            Action::Undo => {
+                "restore this agent's config from the backup taken before the last write".into()
+            }
             Action::Palette => "search every action by name".into(),
             Action::Help => "the about screen and the full key map".into(),
             Action::Quit => format!("leave {}", brand::NAME),
@@ -770,6 +779,7 @@ impl Action {
             // already reports, so it belongs in the palette rather than under a
             // finger beside the keys that edit a config.
             Action::Update => return None,
+            Action::Undo => "U",
             Action::Palette => "ctrl+p or ctrl+k",
             Action::Help => "?",
             Action::Quit => "q",
@@ -819,7 +829,7 @@ impl Action {
             | Action::Doctor
             | Action::Update => None,
             Action::SelectAgent(_) => None,
-            Action::Add | Action::Preset(_) | Action::Use(Some(_)) => no_agent(),
+            Action::Add | Action::Preset(_) | Action::Use(Some(_)) | Action::Undo => no_agent(),
             // Enter on the agent pane only moves the focus, so it is always fine.
             Action::Detail if app.focus == Pane::Agents => None,
             // Deliberately not gated on `per_provider_models`: that flag means
@@ -922,6 +932,7 @@ impl Action {
             }
             Action::Doctor => app.open_doctor(),
             Action::Update => app.schedule(Job::Update, "asking about the latest release…"),
+            Action::Undo => app.ask_undo(),
             Action::Palette => app.open_palette(),
             Action::Help => app.overlay = Some(Overlay::About { scroll: 0 }),
             Action::Quit => app.quit = true,
@@ -1283,6 +1294,8 @@ enum Pending {
     OverwriteSkill {
         target_agent: String,
     },
+    /// Put the agent's config back as the backup has it.
+    Undo,
 }
 
 impl Pending {
@@ -1290,6 +1303,7 @@ impl Pending {
     fn verb(&self) -> &'static str {
         match self {
             Pending::OverwriteSkill { .. } => "overwrite",
+            Pending::Undo => "restore",
             _ => "delete",
         }
     }
@@ -2000,6 +2014,7 @@ impl App {
             KeyCode::Char('S') => self.dispatch(Action::Sync { prune: true }),
             KeyCode::Char('r') => self.dispatch(Action::Reload),
             KeyCode::Char('D') => self.dispatch(Action::Doctor),
+            KeyCode::Char('U') => self.dispatch(Action::Undo),
             _ => {}
         }
     }
@@ -2394,6 +2409,48 @@ impl App {
             self.say(Tone::Good, "doctor found no problems");
         } else {
             self.say(Tone::Bad, format!("doctor found {problems} problem(s)"));
+        }
+    }
+
+    /// Ask before putting a config back: the restore overwrites whatever is
+    /// there now, and unlike every other write in this program it takes no
+    /// backup of what it replaces.
+    fn ask_undo(&mut self) {
+        let Some(agent) = self.agent() else { return };
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            prompt: format!(
+                "Restore {} from the backup taken before {} last wrote to it? Anything changed                  since then is lost.",
+                agent.config_path.display(),
+                brand::NAME
+            ),
+            agent_id: agent.id.clone(),
+            subject_id: agent.name.clone(),
+            pending: Pending::Undo,
+        }));
+    }
+
+    fn undo(&mut self, agent_id: &str) {
+        let Some((name, path)) = self
+            .agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .map(|agent| (agent.name.clone(), agent.config_path.clone()))
+        else {
+            return;
+        };
+
+        match store::restore_backup(&path) {
+            Ok(true) => {
+                self.refresh_selected();
+                self.say(Tone::Good, format!("restored {}", path.display()));
+            }
+            // Not a failure: there is simply nothing to put back, which is the
+            // normal state of a config this program has never written to.
+            Ok(false) => self.say(
+                Tone::Info,
+                format!("nothing to undo; {} has not written to {name}'s config", brand::NAME),
+            ),
+            Err(err) => self.say(Tone::Bad, format!("undo failed: {err:#}")),
         }
     }
 
@@ -2972,6 +3029,7 @@ impl App {
                         });
                     }
                     Pending::DeleteSkill => self.delete_skill(&agent_id, &id),
+                    Pending::Undo => self.undo(&agent_id),
                     Pending::OverwriteSkill { target_agent } => {
                         self.overwrite_skill(&agent_id, &target_agent, &id)
                     }
@@ -3355,6 +3413,7 @@ impl App {
                     // whole, rather than to a row of the list beside it.
                     (Pane::Agents, _) => Hint::bar([
                         Action::Lens(None),
+                        Action::Undo,
                         Action::Doctor,
                         Action::Palette,
                         Action::Reload,
@@ -5286,6 +5345,43 @@ mod render_tests {
         assert!(matches!(app.pending, Some(Job::Update)), "the check was not scheduled");
         assert!(app.status.text.contains("latest release"), "unannounced: {:?}", app.status.text);
         assert!(app.overlay.is_none(), "the report cannot exist before the check ran");
+    }
+
+    #[test]
+    fn undo_asks_first_and_says_what_it_would_lose() {
+        let mut app = scene();
+        app.dispatch(Action::Undo);
+
+        let Some(Overlay::Confirm(confirm)) = &app.overlay else {
+            panic!("undo went ahead without asking");
+        };
+        assert_eq!(confirm.pending, Pending::Undo);
+        assert_eq!(confirm.pending.verb(), "restore", "the y key must not say delete");
+        assert!(confirm.prompt.contains("config.toml"), "no path named: {:?}", confirm.prompt);
+        assert!(confirm.prompt.contains("lost"), "the cost is not stated: {:?}", confirm.prompt);
+
+        let text = screen(&mut app, 120, 30);
+        assert!(text.contains("y restore") && text.contains("n cancel"), "no hints:\n{text}");
+    }
+
+    #[test]
+    fn declining_the_undo_leaves_the_config_alone() {
+        let mut app = scene();
+        app.dispatch(Action::Undo);
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+
+        assert!(app.overlay.is_none(), "the confirm stayed open");
+        assert!(app.status.text.contains("cancelled"), "{:?}", app.status.text);
+    }
+
+    #[test]
+    fn undoing_an_agent_with_no_backup_is_not_an_error() {
+        let mut app = scene();
+        // scene() points at paths that do not exist, so no backup does either.
+        app.undo("codex");
+
+        assert_eq!(app.status.tone, Tone::Info, "a missing backup reported as a failure");
+        assert!(app.status.text.contains("nothing to undo"), "{:?}", app.status.text);
     }
 
     /// The skills pane, on the agent that has any.
