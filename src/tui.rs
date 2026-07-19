@@ -1510,7 +1510,14 @@ fn update_report(status: &crate::update::Status) -> Report {
             }
             report.blank();
             report.line(Tone::Info, available.url.clone());
-            report.line(Tone::Info, "run `confai update` for the upgrade commands");
+            report.blank();
+            report.line(Tone::Info, "upgrade");
+            // The same list `confai update` prints. This program does not
+            // replace its own binary, so naming the way is all either surface
+            // can do, and neither should be guessing at the installers.
+            for command in crate::commands::upgrade_commands() {
+                report.nested(Tone::Info, command);
+            }
         }
     }
     report
@@ -5679,8 +5686,12 @@ mod render_tests {
         // The changelog is the reason to care, so it is in the report.
         assert!(text.contains("skills as a third lens"), "no changelog bullets:\n{text}");
         assert!(text.contains("https://example.invalid/releases/0.1.0"), "no link:\n{text}");
-        // This program does not replace its own binary; the CLI names the way.
-        assert!(text.contains("confai update"), "no route to the upgrade:\n{text}");
+        // The upgrade route is spelled out here rather than deferred to the CLI,
+        // and it is the CLI's own list so the two cannot drift.
+        assert!(text.contains("upgrade"), "no upgrade section:\n{text}");
+        for command in crate::commands::upgrade_commands() {
+            assert!(text.contains(&command), "upgrade command {command:?} missing:\n{text}");
+        }
     }
 
     #[test]
