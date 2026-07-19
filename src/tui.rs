@@ -569,6 +569,8 @@ enum Action {
     SyncPreview,
     /// Put back the config as it was before this program last wrote to it.
     Undo,
+    /// The same, for every installed agent at once.
+    UndoAll,
     /// Open the selected agent's config file in `$EDITOR`.
     EditConfig,
     Palette,
@@ -599,6 +601,7 @@ fn menu() -> Vec<Action> {
         Action::Doctor,
         Action::Update,
         Action::Undo,
+        Action::UndoAll,
         Action::Palette,
         Action::Help,
         Action::Quit,
@@ -670,6 +673,7 @@ impl Action {
             Action::RefreshCatalog => "refresh model catalogue".into(),
             Action::SyncPreview => "preview a sync".into(),
             Action::Undo => "undo the last change".into(),
+            Action::UndoAll => "undo the last change on every agent".into(),
             Action::EditConfig => "edit config in $EDITOR".into(),
             Action::Palette => "command palette".into(),
             Action::Help => "help".into(),
@@ -712,6 +716,7 @@ impl Action {
             Action::RefreshCatalog => "refresh",
             Action::SyncPreview => "preview",
             Action::Undo => "undo",
+            Action::UndoAll => "undo all",
             Action::EditConfig => "editor",
             Action::Palette => "commands",
             Action::Help => "help",
@@ -772,6 +777,7 @@ impl Action {
             Action::Undo => {
                 "restore this agent's config from the backup taken before the last write".into()
             }
+            Action::UndoAll => "restore every installed agent's config from its own backup".into(),
             Action::EditConfig => {
                 "open this agent's config file in $EDITOR and re-read it afterwards".into()
             }
@@ -822,6 +828,9 @@ impl Action {
             Action::RefreshCatalog => return None,
             Action::SyncPreview => return None,
             Action::Undo => "U",
+            // No key of its own: it is the widest undo there is, and reaching it
+            // by name means reading what it is on the way past.
+            Action::UndoAll => return None,
             Action::EditConfig => "E",
             Action::Palette => "ctrl+p or ctrl+k",
             Action::Help => "?",
@@ -878,6 +887,9 @@ impl Action {
             | Action::Use(Some(_))
             | Action::Undo
             | Action::EditConfig => no_agent(),
+            // Every installed agent is its own target, so there is nothing to
+            // have selected first.
+            Action::UndoAll => None,
             // Enter on the agent pane only moves the focus, so it is always fine.
             Action::Detail if app.focus == Pane::Agents => None,
             // Deliberately not gated on `per_provider_models`: that flag means
@@ -992,6 +1004,7 @@ impl Action {
             }
             Action::SyncPreview => app.schedule(Job::SyncPreview, "asking what it serves…"),
             Action::Undo => app.ask_undo(),
+            Action::UndoAll => app.ask_undo_all(),
             Action::EditConfig => app.schedule(Job::EditConfig, "handing the config to $EDITOR…"),
             Action::Palette => app.open_palette(),
             Action::Help => app.overlay = Some(Overlay::About { scroll: 0 }),
@@ -1356,6 +1369,16 @@ enum Pending {
     },
     /// Put the agent's config back as the backup has it.
     Undo,
+    /// Write a provider preset in, named by its id.
+    ApplyPreset(String),
+    /// Write an MCP server in, already built from whichever source offered it.
+    InstallServer {
+        server: Box<mcp::Server>,
+        /// Variables it needs that this environment does not set.
+        missing: Vec<String>,
+        /// What to blame in the status line if the write fails.
+        what: &'static str,
+    },
 }
 
 impl Pending {
@@ -1364,6 +1387,7 @@ impl Pending {
         match self {
             Pending::OverwriteSkill { .. } => "overwrite",
             Pending::Undo => "restore",
+            Pending::ApplyPreset(_) | Pending::InstallServer { .. } => "write",
             _ => "delete",
         }
     }
@@ -1377,11 +1401,15 @@ struct Confirm {
     /// The provider, MCP server or skill directory the answer applies to.
     subject_id: String,
     pending: Pending,
+    /// Agents to run this against, when it is more than the one. Empty means
+    /// just `agent_id`, which is every confirm but a broadcast.
+    every: Vec<String>,
 }
 
 struct PresetPicker {
     presets: Vec<Preset>,
     cursor: Cursor,
+    scope: Scope,
 }
 
 impl PresetPicker {
@@ -1393,6 +1421,13 @@ impl PresetPicker {
 struct McpPresetPicker {
     presets: Vec<preset::McpPreset>,
     cursor: Cursor,
+    scope: Scope,
+}
+
+impl McpPresetPicker {
+    fn selected(&self) -> Option<&preset::McpPreset> {
+        self.presets.get(self.cursor.index())
+    }
 }
 
 /// One agent a skill could be copied into.
@@ -1570,11 +1605,18 @@ struct RegistryPicker {
     entries: Vec<registry::Entry>,
     matches: Vec<usize>,
     cursor: Cursor,
+    scope: Scope,
 }
 
 impl RegistryPicker {
     fn new(query: String, entries: Vec<registry::Entry>) -> Self {
-        let mut picker = Self { query, entries, matches: Vec::new(), cursor: Cursor::default() };
+        let mut picker = Self {
+            query,
+            entries,
+            matches: Vec::new(),
+            cursor: Cursor::default(),
+            scope: Scope::default(),
+        };
         picker.rebuild();
         picker
     }
@@ -1728,6 +1770,104 @@ fn sync_preview(agent: &AgentEntry, provider: &Provider, served: &[Model]) -> Re
 
     report.summarise("nothing would go wrong");
     report
+}
+
+/// `ctrl+a`, the key every picker that can write widely uses to say so.
+///
+/// A chord rather than a letter: the letters in these panels type into a filter
+/// or pick a row, and widening a write to every agent is not something a stray
+/// keystroke should reach.
+fn is_scope_toggle(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a')
+}
+
+/// Whether a picker writes into the agent you are on, or all of them.
+///
+/// Kept on the picker rather than on the app, so it cannot be left switched on:
+/// it lasts exactly as long as the panel that shows it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    #[default]
+    Selected,
+    EveryAgent,
+}
+
+impl Scope {
+    /// What to add to a panel's title so the wider reach is never a surprise.
+    fn suffix(self) -> &'static str {
+        match self {
+            Scope::Selected => "",
+            Scope::EveryAgent => " · every agent",
+        }
+    }
+
+    /// The panel's hints, which say what enter is about to do. `verb` is the
+    /// panel's own word for it, since a preset is applied and a server installed.
+    fn hints(self, verb: &str) -> Vec<Hint> {
+        match self {
+            Scope::Selected => {
+                vec![Hint::plain("enter", verb), Hint::plain("ctrl+a", "every agent")]
+            }
+            Scope::EveryAgent => vec![
+                Hint::plain("enter", &format!("{verb} into every agent")),
+                Hint::plain("ctrl+a", "just this one"),
+            ],
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            Scope::Selected => Scope::EveryAgent,
+            Scope::EveryAgent => Scope::Selected,
+        }
+    }
+}
+
+/// How far a write can reach, which is decided by what it writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Every agent, since they all store provider endpoints.
+    Providers,
+    /// Only the agents that store MCP servers at all.
+    McpServers,
+}
+
+impl Reach {
+    /// Whether this agent could take the write.
+    ///
+    /// An agent that is not installed is left out: writing a config for a
+    /// program that is not there creates the file, which is a surprise nobody
+    /// asked for when they said "all".
+    fn takes(self, agent: &AgentEntry) -> bool {
+        agent.detection.installed()
+            && match self {
+                Reach::Providers => true,
+                Reach::McpServers => agent.capabilities.mcp,
+            }
+    }
+}
+
+/// The agents a broadcast would actually touch, by id.
+///
+/// The confirm names exactly these, so the count in the question is the count
+/// of files that will change rather than the number of agents that exist.
+fn reachable(agents: &[AgentEntry], reach: Reach) -> Vec<String> {
+    agents.iter().filter(|agent| reach.takes(agent)).map(|agent| agent.id.clone()).collect()
+}
+
+/// The question a broadcast asks before it runs.
+///
+/// It names every agent rather than counting them. This is the widest edit the
+/// program makes and it cannot be taken back in one step, so the blast radius
+/// has to be readable in the question itself.
+fn broadcast_prompt(agents: &[AgentEntry], targets: &[String], lead: &str, note: &str) -> String {
+    let names: Vec<&str> = agents
+        .iter()
+        .filter(|agent| targets.contains(&agent.id))
+        .map(|agent| agent.name.as_str())
+        .collect();
+
+    format!("{lead} on all {} of them — {}? {note}", names.len(), names.join(", "))
 }
 
 /// Which editor to hand a config to.
@@ -2598,9 +2738,20 @@ impl App {
 
     /// Add a registry entry to the selected agent.
     fn install_registry(&mut self, entry: &registry::Entry) {
+        if let Some((server, missing)) = self.registry_server(entry) {
+            self.install_server("mcp install", server, missing);
+        }
+    }
+
+    /// The server a registry entry would launch, or nothing once the reason it
+    /// would not has been reported.
+    fn registry_server(&mut self, entry: &registry::Entry) -> Option<(mcp::Server, Vec<String>)> {
         match entry.to_server(None) {
-            Ok(server) => self.install_server("mcp install", server, missing_env_of(entry)),
-            Err(err) => self.say(Tone::Bad, format!("{err:#}")),
+            Ok(server) => Some((server, missing_env_of(entry))),
+            Err(err) => {
+                self.say(Tone::Bad, format!("{err:#}"));
+                None
+            }
         }
     }
 
@@ -2737,6 +2888,7 @@ impl App {
             agent_id: agent.id.clone(),
             subject_id: server.name.clone(),
             pending: Pending::DeleteMcp,
+            every: Vec::new(),
         }));
     }
 
@@ -2759,6 +2911,7 @@ impl App {
                 self.overlay = Some(Overlay::McpPresets(McpPresetPicker {
                     presets,
                     cursor: Cursor::default(),
+                    scope: Scope::default(),
                 }))
             }
             Err(err) => self.say(Tone::Bad, format!("MCP presets unreadable: {err:#}")),
@@ -2773,16 +2926,55 @@ impl App {
     }
 
     fn apply_mcp_preset(&mut self, entry: &preset::McpPreset) {
-        let server = match entry.server(None) {
-            Ok(server) => server,
+        if let Some((server, missing)) = self.mcp_preset_server(entry) {
+            self.install_server("mcp preset", server, missing);
+        }
+    }
+
+    /// The server a preset describes and the variables it still wants, or
+    /// nothing once the reason has been reported.
+    fn mcp_preset_server(
+        &mut self,
+        entry: &preset::McpPreset,
+    ) -> Option<(mcp::Server, Vec<String>)> {
+        match entry.server(None) {
+            Ok(server) => {
+                Some((server, entry.missing_env().iter().map(|var| format!("${var}")).collect()))
+            }
             Err(err) => {
                 self.say(Tone::Bad, format!("MCP preset {}: {err:#}", entry.id));
-                return;
+                None
             }
-        };
+        }
+    }
 
-        let missing = entry.missing_env().iter().map(|var| format!("${var}")).collect();
-        self.install_server("mcp preset", server, missing);
+    /// Ask before writing the same thing into every agent that can take it.
+    fn ask_broadcast(&mut self, reach: Reach, lead: &str, note: &str, pending: Pending) {
+        let targets = reachable(&self.agents, reach);
+        if targets.is_empty() {
+            self.say(Tone::Bad, "no installed agent can take that");
+            return;
+        }
+
+        let agent_id = self.agent().map(|agent| agent.id.clone()).unwrap_or_default();
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            prompt: broadcast_prompt(&self.agents, &targets, lead, note),
+            agent_id,
+            subject_id: String::new(),
+            pending,
+            every: targets,
+        }));
+    }
+
+    /// Restore every agent's config from its own backup.
+    fn ask_undo_all(&mut self) {
+        self.ask_broadcast(
+            Reach::Providers,
+            "Restore the backup",
+            "Each agent is restored from its own backup, and one this program never wrote to is \
+             left alone.",
+            Pending::Undo,
+        );
     }
 
     /// Add an MCP server to the selected agent and say what it still needs.
@@ -2845,6 +3037,7 @@ impl App {
             agent_id: agent.id.clone(),
             subject_id: agent.name.clone(),
             pending: Pending::Undo,
+            every: Vec::new(),
         }));
     }
 
@@ -2899,6 +3092,7 @@ impl App {
             agent_id: agent.id.clone(),
             subject_id: skill.directory.clone(),
             pending: Pending::DeleteSkill,
+            every: Vec::new(),
         }));
     }
 
@@ -3185,6 +3379,7 @@ impl App {
             agent_id: agent.id.clone(),
             subject_id: provider.id.clone(),
             pending: Pending::DeleteProvider,
+            every: Vec::new(),
         }));
     }
 
@@ -3192,8 +3387,11 @@ impl App {
         match preset::all() {
             Ok(presets) if presets.is_empty() => self.say(Tone::Info, "no presets available"),
             Ok(presets) => {
-                self.overlay =
-                    Some(Overlay::Presets(PresetPicker { presets, cursor: Cursor::default() }))
+                self.overlay = Some(Overlay::Presets(PresetPicker {
+                    presets,
+                    cursor: Cursor::default(),
+                    scope: Scope::default(),
+                }))
             }
             Err(err) => self.say(Tone::Bad, format!("presets unreadable: {err:#}")),
         }
@@ -3315,11 +3513,31 @@ impl App {
             return Some(Overlay::Registry(picker));
         }
 
+        if is_scope_toggle(key) {
+            picker.scope = picker.scope.toggled();
+            return Some(Overlay::Registry(picker));
+        }
+
         match key.code {
             KeyCode::Esc => return None,
             KeyCode::Enter => {
-                if let Some(entry) = picker.selected().cloned() {
-                    self.install_registry(&entry);
+                let entry = picker.selected().cloned()?;
+                match picker.scope {
+                    Scope::Selected => self.install_registry(&entry),
+                    Scope::EveryAgent => {
+                        if let Some((server, missing)) = self.registry_server(&entry) {
+                            self.ask_broadcast(
+                                Reach::McpServers,
+                                &format!("Launch {}", entry.name),
+                                "Each config is changed separately, and undo is per agent.",
+                                Pending::InstallServer {
+                                    server: Box::new(server),
+                                    missing,
+                                    what: "mcp install",
+                                },
+                            );
+                        }
+                    }
                 }
                 return None;
             }
@@ -3464,34 +3682,28 @@ impl App {
     fn confirm_key(&mut self, key: KeyEvent, confirm: Confirm) -> Option<Overlay> {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let Confirm { agent_id, subject_id: id, pending, .. } = confirm;
+                let Confirm { agent_id, subject_id: id, pending, every, .. } = confirm;
+                let targets = if every.is_empty() { vec![agent_id.clone()] } else { every };
+
+                // Each agent is a separate load, edit and save, so one refusing
+                // does not stop the rest. The cursor goes back where it was.
+                let (mut changed, mut refused) = (0usize, 0usize);
+                for target in &targets {
+                    self.select_agent(target);
+                    self.run_pending(&pending, target, &id);
+                    if self.status.tone == Tone::Bad {
+                        refused += 1;
+                    } else {
+                        changed += 1;
+                    }
+                }
                 self.select_agent(&agent_id);
-                match pending {
-                    Pending::DeleteProvider => {
-                        self.health.forget(&agent_id, &id);
-                        self.apply("delete", move |config| {
-                            if config.remove_provider(&id)? {
-                                Ok(format!("removed {id}"))
-                            } else {
-                                anyhow::bail!("no provider called {id:?}")
-                            }
-                        });
-                    }
-                    Pending::DeleteMcp => {
-                        self.mcp_health.forget(&agent_id, &id);
-                        self.apply("delete", move |config| {
-                            if config.remove_mcp(&id)? {
-                                Ok(format!("removed {id}"))
-                            } else {
-                                anyhow::bail!("no MCP server called {id:?}")
-                            }
-                        });
-                    }
-                    Pending::DeleteSkill => self.delete_skill(&agent_id, &id),
-                    Pending::Undo => self.undo(&agent_id),
-                    Pending::OverwriteSkill { target_agent } => {
-                        self.overwrite_skill(&agent_id, &target_agent, &id)
-                    }
+
+                // One agent already said its piece; only a broadcast needs a
+                // tally, because its individual messages have scrolled past.
+                if targets.len() > 1 {
+                    let tone = if refused == 0 { Tone::Good } else { Tone::Warn };
+                    self.say(tone, format!("{changed} agent(s) changed, {refused} refused"));
                 }
                 self.clamp_right();
                 None
@@ -3504,7 +3716,53 @@ impl App {
         }
     }
 
+    /// Carry out a confirmed edit against the agent now selected.
+    ///
+    /// Split out of the confirm so a broadcast can run the very same code once
+    /// per agent rather than growing a second, all-agents implementation of
+    /// every edit.
+    fn run_pending(&mut self, pending: &Pending, agent_id: &str, subject: &str) {
+        let id = subject.to_string();
+        match pending {
+            Pending::DeleteProvider => {
+                self.health.forget(agent_id, subject);
+                self.apply("delete", move |config| {
+                    if config.remove_provider(&id)? {
+                        Ok(format!("removed {id}"))
+                    } else {
+                        anyhow::bail!("no provider called {id:?}")
+                    }
+                });
+            }
+            Pending::DeleteMcp => {
+                self.mcp_health.forget(agent_id, subject);
+                self.apply("delete", move |config| {
+                    if config.remove_mcp(&id)? {
+                        Ok(format!("removed {id}"))
+                    } else {
+                        anyhow::bail!("no MCP server called {id:?}")
+                    }
+                });
+            }
+            Pending::DeleteSkill => self.delete_skill(agent_id, subject),
+            Pending::Undo => self.undo(agent_id),
+            Pending::OverwriteSkill { target_agent } => {
+                let target = target_agent.clone();
+                self.overwrite_skill(agent_id, &target, subject)
+            }
+            Pending::ApplyPreset(preset_id) => self.apply_preset_by_id(&preset_id.clone()),
+            Pending::InstallServer { server, missing, what } => {
+                self.install_server(what, (**server).clone(), missing.clone())
+            }
+        }
+    }
+
     fn preset_key(&mut self, key: KeyEvent, mut picker: PresetPicker) -> Option<Overlay> {
+        if is_scope_toggle(key) {
+            picker.scope = picker.scope.toggled();
+            return Some(Overlay::Presets(picker));
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => None,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -3516,8 +3774,15 @@ impl App {
                 Some(Overlay::Presets(picker))
             }
             KeyCode::Enter => {
-                if let Some(entry) = picker.selected().cloned() {
-                    self.apply_preset(&entry);
+                let entry = picker.selected().cloned()?;
+                match picker.scope {
+                    Scope::Selected => self.apply_preset(&entry),
+                    Scope::EveryAgent => self.ask_broadcast(
+                        Reach::Providers,
+                        &format!("Write the {} endpoint", entry.id),
+                        "Each config is changed separately, and undo is per agent.",
+                        Pending::ApplyPreset(entry.id.clone()),
+                    ),
                 }
                 None
             }
@@ -3526,6 +3791,11 @@ impl App {
     }
 
     fn mcp_preset_key(&mut self, key: KeyEvent, mut picker: McpPresetPicker) -> Option<Overlay> {
+        if is_scope_toggle(key) {
+            picker.scope = picker.scope.toggled();
+            return Some(Overlay::McpPresets(picker));
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => None,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -3537,9 +3807,23 @@ impl App {
                 Some(Overlay::McpPresets(picker))
             }
             KeyCode::Enter => {
-                if let Some(entry) = picker.presets.get(picker.cursor.index()) {
-                    let entry = entry.clone();
-                    self.apply_mcp_preset(&entry);
+                let entry = picker.selected().cloned()?;
+                match picker.scope {
+                    Scope::Selected => self.apply_mcp_preset(&entry),
+                    Scope::EveryAgent => {
+                        if let Some((server, missing)) = self.mcp_preset_server(&entry) {
+                            self.ask_broadcast(
+                                Reach::McpServers,
+                                &format!("Launch {}", entry.id),
+                                "Each config is changed separately, and undo is per agent.",
+                                Pending::InstallServer {
+                                    server: Box::new(server),
+                                    missing,
+                                    what: "mcp preset",
+                                },
+                            );
+                        }
+                    }
                 }
                 None
             }
@@ -3576,6 +3860,7 @@ impl App {
                         agent_id: from_agent,
                         subject_id: picker.skill.clone(),
                         pending: Pending::OverwriteSkill { target_agent: target.id },
+                        every: Vec::new(),
                     }));
                 }
                 None
@@ -3847,24 +4132,26 @@ impl App {
                 Hint::plain("enter", "copy here"),
                 Hint::plain("esc", "cancel"),
             ],
-            Some(Overlay::Presets(_)) | Some(Overlay::McpPresets(_)) => vec![
-                Hint::plain("↑↓", "move"),
-                Hint::plain("enter", "apply"),
-                Hint::plain("esc", "cancel"),
-            ],
+            Some(Overlay::Presets(PresetPicker { scope, .. }))
+            | Some(Overlay::McpPresets(McpPresetPicker { scope, .. })) => {
+                let mut hints = vec![Hint::plain("↑↓", "move")];
+                hints.extend(scope.hints("apply"));
+                hints.push(Hint::plain("esc", "cancel"));
+                hints
+            }
             Some(Overlay::Palette(_)) => vec![
                 Hint::plain("type", "search"),
                 Hint::plain("↑↓", "move"),
                 Hint::plain("enter", "run"),
                 Hint::plain("esc", "close"),
             ],
-            Some(Overlay::Registry(_)) => vec![
-                Hint::plain("type", "filter"),
-                Hint::plain("ctrl+r", "search registry"),
-                Hint::plain("arrows", "move"),
-                Hint::plain("enter", "install"),
-                Hint::plain("esc", "cancel"),
-            ],
+            Some(Overlay::Registry(picker)) => {
+                let mut hints =
+                    vec![Hint::plain("type", "filter"), Hint::plain("ctrl+r", "search registry")];
+                hints.extend(picker.scope.hints("install"));
+                hints.push(Hint::plain("esc", "cancel"));
+                hints
+            }
             Some(Overlay::Models(_)) => vec![
                 Hint::plain("type", "filter"),
                 Hint::plain("↑↓", "move"),
@@ -4505,7 +4792,7 @@ impl App {
 
 fn render_registry(frame: &mut Frame, picker: &RegistryPicker) -> (Rect, RowsAt) {
     let search = Search {
-        title: "mcp registry",
+        title: &format!("mcp registry{}", picker.scope.suffix()),
         query: &picker.query,
         placeholder: "type to filter these, ctrl+r to ask the registry again",
         empty: "nothing fetched matches that; ctrl+r asks the registry",
@@ -4868,7 +5155,11 @@ fn render_confirm(frame: &mut Frame, confirm: &Confirm) -> Rect {
 fn render_presets(frame: &mut Frame, picker: &PresetPicker) -> (Rect, RowsAt) {
     let area = centered(frame.area(), 74, 84);
     frame.render_widget(Clear, area);
-    let outer = overlay_frame(frame, area, &format!("presets {}", picker.presets.len()));
+    let outer = overlay_frame(
+        frame,
+        area,
+        &format!("presets {}{}", picker.presets.len(), picker.scope.suffix()),
+    );
 
     // The card follows the cursor rather than waiting behind a key, so what a
     // preset would write is readable before enter writes it.
@@ -4938,7 +5229,7 @@ fn render_mcp_presets(frame: &mut Frame, picker: &McpPresetPicker) -> (Rect, Row
         .collect();
 
     let rows_at = ListPane {
-        title: format!("mcp presets {}", picker.presets.len()).into(),
+        title: format!("mcp presets {}{}", picker.presets.len(), picker.scope.suffix()).into(),
         focused: true,
         header: Some(columns.header(&["preset", "command or url", "what it does"])),
         rows,
@@ -5558,11 +5849,13 @@ mod render_tests {
                 agent_id: "codex".into(),
                 subject_id: "primary".into(),
                 pending: Pending::DeleteProvider,
+                every: Vec::new(),
             }),
             Overlay::McpDetail { scroll: 0 },
             Overlay::McpPresets(McpPresetPicker {
                 presets: preset::mcp_all().expect("shipped mcp presets"),
                 cursor: Cursor::default(),
+                scope: Scope::default(),
             }),
             Overlay::Form(Form::mcp("codex", None)),
             Overlay::SkillDetail { scroll: 0 },
@@ -6314,6 +6607,132 @@ mod render_tests {
         app.focus = Pane::Providers;
         app.dispatch(Action::SyncPreview);
         assert!(matches!(app.pending, Some(Job::SyncPreview)), "not scheduled");
+    }
+
+    #[test]
+    fn a_broadcast_reaches_only_the_agents_that_could_take_it() {
+        let mut app = scene();
+
+        // Every agent stores providers.
+        assert_eq!(reachable(&app.agents, Reach::Providers).len(), 2);
+        assert_eq!(reachable(&app.agents, Reach::McpServers).len(), 2);
+
+        // An agent that stores no MCP servers is not a target for one.
+        app.agents[1].capabilities.mcp = false;
+        assert_eq!(reachable(&app.agents, Reach::McpServers), ["codex.fixture"]);
+        assert_eq!(
+            reachable(&app.agents, Reach::Providers).len(),
+            2,
+            "providers reach it either way"
+        );
+
+        // An agent that is not installed is left out of everything: writing a
+        // config for a program that is not there would create the file.
+        app.agents[0].detection = Detection { binary_on_path: false, config_exists: false };
+        assert!(reachable(&app.agents, Reach::McpServers).is_empty());
+        assert_eq!(reachable(&app.agents, Reach::Providers), ["opencode.fixture"]);
+    }
+
+    #[test]
+    fn the_question_names_every_agent_it_would_change() {
+        let app = scene();
+        let targets = reachable(&app.agents, Reach::Providers);
+        let prompt = broadcast_prompt(&app.agents, &targets, "Write the byesu endpoint", "Mind.");
+
+        assert!(prompt.contains("all 2 of them"), "{prompt}");
+        // Named, not counted: a count does not tell you which configs change.
+        assert!(prompt.contains("Codex") && prompt.contains("opencode"), "{prompt}");
+        assert!(prompt.ends_with("Mind."), "the caveat was dropped: {prompt}");
+    }
+
+    #[test]
+    fn a_picker_set_to_every_agent_asks_before_it_writes_anything() {
+        let mut app = scene();
+        app.dispatch(Action::Preset(None));
+
+        let Some(Overlay::Presets(picker)) = &mut app.overlay else { panic!("no picker") };
+        assert_eq!(picker.scope, Scope::Selected, "a picker must not open set to all");
+        picker.scope = Scope::EveryAgent;
+        let chosen = picker.selected().expect("no preset").id.clone();
+
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+
+        let Some(Overlay::Confirm(confirm)) = &app.overlay else {
+            panic!("enter wrote without asking: {:?}", app.status.text)
+        };
+        assert_eq!(confirm.pending, Pending::ApplyPreset(chosen));
+        assert_eq!(confirm.every.len(), 2, "the confirm does not carry its targets");
+        assert!(confirm.prompt.contains("Codex, opencode"), "{}", confirm.prompt);
+    }
+
+    #[test]
+    fn the_scope_is_visible_in_the_panel_that_carries_it() {
+        let mut app = scene();
+        app.dispatch(Action::Preset(None));
+
+        let narrow = screen(&mut app, 110, 30);
+        // The title stays plain; only the hint advertises the way to widen it.
+        assert!(!narrow.contains("· every agent"), "unset scope announced itself:\n{narrow}");
+        assert!(narrow.contains("ctrl+a every agent"), "no way to widen it:\n{narrow}");
+
+        if let Some(Overlay::Presets(picker)) = &mut app.overlay {
+            picker.scope = Scope::EveryAgent;
+        }
+        let wide = screen(&mut app, 110, 30);
+        // Both the title and the hint say so, because enter now means more.
+        assert!(wide.contains("presets"), "{wide}");
+        assert!(wide.contains("· every agent"), "the title does not say so:\n{wide}");
+        assert!(wide.contains("enter apply into every agent"), "{wide}");
+        assert!(wide.contains("ctrl+a just this one"), "no way back:\n{wide}");
+    }
+
+    #[test]
+    fn ctrl_a_toggles_the_scope_and_a_bare_a_does_not() {
+        let mut app = scene();
+        app.dispatch(Action::Preset(None));
+
+        let scope = |app: &App| match &app.overlay {
+            Some(Overlay::Presets(picker)) => picker.scope,
+            _ => panic!("the picker closed"),
+        };
+
+        app.on_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(scope(&app), Scope::Selected, "a stray letter widened the write");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(scope(&app), Scope::EveryAgent);
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(scope(&app), Scope::Selected, "the toggle only goes one way");
+    }
+
+    #[test]
+    fn undo_on_every_agent_names_them_and_needs_no_agent_selected() {
+        let mut app = scene();
+        // It targets every installed agent, so there is nothing to select first.
+        assert!(Action::UndoAll.unavailable(&app).is_none());
+
+        app.dispatch(Action::UndoAll);
+        let Some(Overlay::Confirm(confirm)) = &app.overlay else { panic!("undo all did not ask") };
+        assert_eq!(confirm.pending, Pending::Undo);
+        assert_eq!(confirm.every.len(), 2);
+        assert!(confirm.prompt.contains("Codex, opencode"), "{}", confirm.prompt);
+        // The per-agent nature of the backups is stated, not assumed.
+        assert!(confirm.prompt.contains("its own backup"), "{}", confirm.prompt);
+    }
+
+    #[test]
+    fn a_confirmed_broadcast_runs_once_per_agent_and_tallies_the_result() {
+        let mut app = scene();
+        app.dispatch(Action::UndoAll);
+        app.on_key(KeyEvent::from(KeyCode::Char('y')));
+
+        // The fixtures point at paths with no backup, so every agent declines
+        // and none of them is an error.
+        assert!(app.overlay.is_none(), "the confirm stayed open");
+        assert!(app.status.text.contains("2 agent(s) changed"), "{:?}", app.status.text);
+        assert!(app.status.text.contains("0 refused"), "{:?}", app.status.text);
+        // And the cursor is back where it started rather than on the last agent.
+        assert_eq!(app.agent_cursor.index(), 0);
     }
 
     /// The skills pane, on the agent that has any.
