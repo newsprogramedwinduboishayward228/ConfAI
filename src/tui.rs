@@ -563,6 +563,10 @@ enum Action {
     Doctor,
     /// Ask now whether a newer release exists.
     Update,
+    /// Re-download the models.dev catalogue the model limits and prices come from.
+    RefreshCatalog,
+    /// Show what a sync would write, without writing it.
+    SyncPreview,
     /// Put back the config as it was before this program last wrote to it.
     Undo,
     /// Open the selected agent's config file in `$EDITOR`.
@@ -586,6 +590,8 @@ fn menu() -> Vec<Action> {
         Action::CheckAll,
         Action::Sync { prune: false },
         Action::Sync { prune: true },
+        Action::SyncPreview,
+        Action::RefreshCatalog,
         Action::Preset(None),
         Action::Lens(None),
         Action::Reload,
@@ -661,6 +667,8 @@ impl Action {
             Action::Reload => "reload from disk".into(),
             Action::Doctor => "doctor".into(),
             Action::Update => "check for updates".into(),
+            Action::RefreshCatalog => "refresh model catalogue".into(),
+            Action::SyncPreview => "preview a sync".into(),
             Action::Undo => "undo the last change".into(),
             Action::EditConfig => "edit config in $EDITOR".into(),
             Action::Palette => "command palette".into(),
@@ -701,6 +709,8 @@ impl Action {
             Action::Reload => "reload",
             Action::Doctor => "doctor",
             Action::Update => "update",
+            Action::RefreshCatalog => "refresh",
+            Action::SyncPreview => "preview",
             Action::Undo => "undo",
             Action::EditConfig => "editor",
             Action::Palette => "commands",
@@ -753,6 +763,12 @@ impl Action {
             Action::Reload => "re-read every config from disk".into(),
             Action::Doctor => "check every config parses and every selected provider exists".into(),
             Action::Update => "ask whether a newer release of this program exists".into(),
+            Action::RefreshCatalog => {
+                "re-download models.dev instead of using the day-old cache".into()
+            }
+            Action::SyncPreview => {
+                "show what a sync would write and drop, without writing it".into()
+            }
             Action::Undo => {
                 "restore this agent's config from the backup taken before the last write".into()
             }
@@ -801,6 +817,10 @@ impl Action {
             // already reports, so it belongs in the palette rather than under a
             // finger beside the keys that edit a config.
             Action::Update => return None,
+            // Like `update`: a download, for something the daily cache already
+            // keeps current on its own.
+            Action::RefreshCatalog => return None,
+            Action::SyncPreview => return None,
             Action::Undo => "U",
             Action::EditConfig => "E",
             Action::Palette => "ctrl+p or ctrl+k",
@@ -850,7 +870,8 @@ impl Action {
             | Action::Palette
             | Action::Filter
             | Action::Doctor
-            | Action::Update => None,
+            | Action::Update
+            | Action::RefreshCatalog => None,
             Action::SelectAgent(_) => None,
             Action::Add
             | Action::Preset(_)
@@ -871,6 +892,10 @@ impl Action {
                 .agent()
                 .is_none_or(|agent| agent.providers.is_empty())
                 .then(|| "this agent has no providers to check".to_string()),
+            // Not gated on `per_provider_models` the way `Sync` is: an agent
+            // that stores no model list is precisely who benefits from being
+            // shown that a sync would write nothing, rather than being refused.
+            Action::SyncPreview => no_provider(),
             Action::Sync { .. } => no_provider().or_else(|| {
                 app.agent().filter(|agent| !agent.capabilities.per_provider_models).map(|agent| {
                     format!("{} stores no model list; press m to choose a model", agent.name)
@@ -962,6 +987,10 @@ impl Action {
             }
             Action::Doctor => app.open_doctor(),
             Action::Update => app.schedule(Job::Update, "asking about the latest release…"),
+            Action::RefreshCatalog => {
+                app.schedule(Job::RefreshCatalog, "re-downloading the models.dev catalogue…")
+            }
+            Action::SyncPreview => app.schedule(Job::SyncPreview, "asking what it serves…"),
             Action::Undo => app.ask_undo(),
             Action::EditConfig => app.schedule(Job::EditConfig, "handing the config to $EDITOR…"),
             Action::Palette => app.open_palette(),
@@ -1646,6 +1675,61 @@ fn preset_card(entry: &Preset) -> Vec<(String, String)> {
     card
 }
 
+/// What a sync would change, worked out without writing any of it.
+///
+/// The counts are the ones `confai provider sync --dry-run` prints, plus how
+/// many of the arrivals are actually new: "42 models" means little next to "42
+/// models, 2 of them new", and the difference is the whole reason to look
+/// before syncing.
+fn sync_preview(agent: &AgentEntry, provider: &Provider, served: &[Model]) -> Report {
+    let mut report = Report::new(format!("sync {} · {}", agent.name, provider.id));
+
+    let known: Vec<&str> = provider.models.iter().map(|model| model.id.as_str()).collect();
+    let arriving: Vec<&str> = served.iter().map(|model| model.id.as_str()).collect();
+    let fresh = arriving.iter().filter(|id| !known.contains(*id)).count();
+    let stale: Vec<&str> = known.iter().filter(|id| !arriving.contains(*id)).copied().collect();
+
+    report.line(Tone::Info, format!("{} serves {} model(s)", provider.id, served.len()));
+
+    // The agents that keep no model list are the ones where a sync looks like it
+    // did nothing, so the preview is the right place to say why.
+    if !agent.capabilities.per_provider_models {
+        report.nested(
+            Tone::Warn,
+            format!("{} stores no model list, so a sync would write none of them", agent.name),
+        );
+        report.nested(Tone::Info, "press m to choose one of them as the model instead");
+        report.summarise("nothing to write");
+        return report;
+    }
+
+    report.nested(Tone::Good, format!("{} would be written", served.len()));
+    report.nested(
+        Tone::Info,
+        match fresh {
+            0 => "none of them are new".to_string(),
+            count => format!("{count} of them are new"),
+        },
+    );
+
+    if stale.is_empty() {
+        report.nested(Tone::Info, "nothing in the config has gone stale");
+    } else {
+        report.nested(
+            Tone::Warn,
+            format!(
+                "{} in the config the endpoint no longer serves: {}",
+                stale.len(),
+                stale.join(", ")
+            ),
+        );
+        report.nested(Tone::Info, "S syncs and drops those; s leaves them alone");
+    }
+
+    report.summarise("nothing would go wrong");
+    report
+}
+
 /// Which editor to hand a config to.
 ///
 /// `VISUAL` wins over `EDITOR`, as it does everywhere else, and either being set
@@ -1860,6 +1944,11 @@ enum Job {
     EditConfig,
     /// Ask the official MCP registry for the servers matching a query.
     Registry(String),
+    /// Re-download the models.dev catalogue rather than waiting for the daily
+    /// cache to go stale.
+    RefreshCatalog,
+    /// Work out what a sync would change, and write none of it.
+    SyncPreview,
 }
 
 /// Where a list was last drawn and how far it had scrolled, so a click can be
@@ -2456,6 +2545,38 @@ impl App {
             Job::Update => self.check_update(),
             Job::EditConfig => self.edit_config(terminal),
             Job::Registry(query) => self.search_registry(&query),
+            Job::RefreshCatalog => self.refresh_catalog(),
+            Job::SyncPreview => self.preview_sync(),
+        }
+    }
+
+    /// Ask the endpoint what it serves, then report what syncing it would do.
+    fn preview_sync(&mut self) {
+        let (Some(provider), Some(agent_id)) =
+            (self.provider().cloned(), self.agent().map(|a| a.id.clone()))
+        else {
+            return;
+        };
+
+        let Some(served) = self.discover(&provider, &agent_id) else { return };
+        let Some(agent) = self.agent() else { return };
+
+        let report = sync_preview(agent, &provider, &served);
+        self.say(Tone::Info, format!("{} would write {} model(s)", provider.id, served.len()));
+        self.overlay = Some(Overlay::Report(report));
+    }
+
+    /// Pull a fresh models.dev catalogue into the cache.
+    ///
+    /// The CLI spells this as `--refresh` on the two commands that read the
+    /// catalogue. Here it is one action instead, because it refreshes the cache
+    /// those commands share: the model picker, the provider detail and every
+    /// later sync all read whatever this leaves behind.
+    fn refresh_catalog(&mut self) {
+        match catalog::Catalog::load(true) {
+            Ok(catalog) => self
+                .say(Tone::Good, format!("models.dev refreshed; {} model(s) known", catalog.len())),
+            Err(err) => self.say(Tone::Bad, format!("models.dev unavailable: {err:#}")),
         }
     }
 
@@ -6127,6 +6248,72 @@ mod render_tests {
             assert!(text.contains(label), "card missing {label}:\n{text}");
         }
         assert!(text.contains("enter apply"), "no way to apply what is shown:\n{text}");
+    }
+
+    fn models(ids: &[&str]) -> Vec<Model> {
+        ids.iter().map(|id| Model::new(*id)).collect()
+    }
+
+    #[test]
+    fn a_sync_preview_counts_what_arrives_and_what_went_stale() {
+        let mut app = scene();
+        // opencode keeps a per-provider model list, which is what sync writes.
+        let agent = &mut app.agents[1];
+        agent.providers.push(Provider::new("gateway"));
+        agent.providers[0].models = models(&["kept", "gone-away"]);
+
+        let provider = agent.providers[0].clone();
+        let report = sync_preview(agent, &provider, &models(&["kept", "brand-new"]));
+        let text = findings(&report);
+
+        assert!(text.contains("serves 2 model(s)"), "{text}");
+        assert!(text.contains("2 would be written"), "{text}");
+        assert!(text.contains("1 of them are new"), "no count of arrivals:\n{text}");
+        // Naming the stale one matters: the number alone does not say what goes.
+        assert!(text.contains("1 in the config the endpoint no longer serves"), "{text}");
+        assert!(text.contains("gone-away"), "the stale model is not named:\n{text}");
+        assert!(text.contains("S syncs and drops those"), "no route to pruning:\n{text}");
+    }
+
+    #[test]
+    fn a_sync_preview_writes_nothing_and_says_so_for_an_agent_with_no_model_list() {
+        let app = scene();
+        // Codex stores no per-provider model list.
+        let agent = &app.agents[0];
+        assert!(!agent.capabilities.per_provider_models);
+
+        let provider = agent.providers[0].clone();
+        let report = sync_preview(agent, &provider, &models(&["a", "b", "c"]));
+        let text = findings(&report);
+
+        assert!(text.contains("serves 3 model(s)"), "{text}");
+        assert!(text.contains("stores no model list"), "{text}");
+        // The thing that does work is named, rather than leaving a dead end.
+        assert!(text.contains("press m"), "no alternative offered:\n{text}");
+        assert!(text.contains("nothing to write"), "{text}");
+    }
+
+    #[test]
+    fn a_preview_is_offered_where_a_sync_itself_is_refused() {
+        let mut app = scene();
+        app.focus = Pane::Providers;
+        // Codex stores no model list, so syncing is refused...
+        assert!(Action::Sync { prune: false }.unavailable(&app).is_some());
+        // ...but the preview is exactly what explains why.
+        assert!(Action::SyncPreview.unavailable(&app).is_none());
+    }
+
+    #[test]
+    fn the_catalogue_refresh_and_the_preview_are_announced_as_jobs() {
+        let mut app = scene();
+        app.dispatch(Action::RefreshCatalog);
+        assert!(matches!(app.pending, Some(Job::RefreshCatalog)), "not scheduled");
+        assert!(app.status.text.contains("models.dev"), "{:?}", app.status.text);
+
+        let mut app = scene();
+        app.focus = Pane::Providers;
+        app.dispatch(Action::SyncPreview);
+        assert!(matches!(app.pending, Some(Job::SyncPreview)), "not scheduled");
     }
 
     /// The skills pane, on the agent that has any.
