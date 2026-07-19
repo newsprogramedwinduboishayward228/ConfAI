@@ -1355,6 +1355,12 @@ struct PresetPicker {
     cursor: Cursor,
 }
 
+impl PresetPicker {
+    fn selected(&self) -> Option<&Preset> {
+        self.presets.get(self.cursor.index())
+    }
+}
+
 struct McpPresetPicker {
     presets: Vec<preset::McpPreset>,
     cursor: Cursor,
@@ -1583,6 +1589,61 @@ fn missing_env_of(entry: &registry::Entry) -> Vec<String> {
 /// `None` when it needs nothing, so the caller has no empty case to special-case.
 fn missing_note(name: &str, missing: &[String]) -> Option<String> {
     (!missing.is_empty()).then(|| format!("added {name}, but {} not set", missing.join(", ")))
+}
+
+/// Everything `confai preset show` prints about a preset, as label/value pairs.
+///
+/// The picker listed an id, a name and a base URL, which is not enough to know
+/// what applying it would write — whether it needs a key, which variable that
+/// key comes from, what model it would select. That is the whole reason the CLI
+/// has a `show` at all.
+fn preset_card(entry: &Preset) -> Vec<(String, String)> {
+    let provider = entry.provider(None).ok();
+    let mut card: Vec<(String, String)> = Vec::new();
+
+    if !entry.description.is_empty() {
+        card.push(("what".into(), entry.description.clone()));
+    }
+    if let Some(homepage) = &entry.homepage {
+        card.push(("homepage".into(), homepage.clone()));
+    }
+
+    match &provider {
+        Some(provider) => {
+            card.push(("provider id".into(), provider.id.clone()));
+            card.push((
+                "base url".into(),
+                provider.base_url.clone().unwrap_or_else(|| ABSENT.to_string()),
+            ));
+            card.push((
+                "wire api".into(),
+                provider.wire_api.map(WireApi::as_str).unwrap_or(ABSENT).to_string(),
+            ));
+        }
+        // A preset that will not build is worth saying so on the card rather
+        // than showing an empty one and failing at enter.
+        None => card.push(("provider".into(), "this preset does not describe one".into())),
+    }
+
+    card.push((
+        "api key".into(),
+        match (&entry.api_key_env, provider.as_ref().and_then(|p| p.api_key.as_deref())) {
+            (Some(var), Some(_)) => format!("from ${var}"),
+            (Some(var), None) => format!("required, set ${var}"),
+            (None, _) => "not required".into(),
+        },
+    ));
+    if let Some(model) = &entry.default_model {
+        card.push(("default model".into(), model.clone()));
+    }
+    card.push((
+        "models".into(),
+        match provider.as_ref().map(|p| p.models.len()).unwrap_or_default() {
+            0 => "discovered by sync".to_string(),
+            count => count.to_string(),
+        },
+    ));
+    card
 }
 
 /// Which editor to hand a config to.
@@ -3334,8 +3395,7 @@ impl App {
                 Some(Overlay::Presets(picker))
             }
             KeyCode::Enter => {
-                if let Some(entry) = picker.presets.get(picker.cursor.index()) {
-                    let entry = entry.clone();
+                if let Some(entry) = picker.selected().cloned() {
                     self.apply_preset(&entry);
                 }
                 None
@@ -4685,10 +4745,19 @@ fn render_confirm(frame: &mut Frame, confirm: &Confirm) -> Rect {
 }
 
 fn render_presets(frame: &mut Frame, picker: &PresetPicker) -> (Rect, RowsAt) {
-    let area = centered(frame.area(), 74, 74);
-    let inner = area.width.saturating_sub(2) as usize;
-    let columns = Columns::flexible(inner.saturating_sub(1), &[18, 22], 2, 16);
+    let area = centered(frame.area(), 74, 84);
+    frame.render_widget(Clear, area);
+    let outer = overlay_frame(frame, area, &format!("presets {}", picker.presets.len()));
 
+    // The card follows the cursor rather than waiting behind a key, so what a
+    // preset would write is readable before enter writes it.
+    let card = picker.selected().map(preset_card).unwrap_or_default();
+    let [list, detail] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(card.len() as u16 + 1)])
+            .areas(outer);
+
+    let width = list.width as usize;
+    let columns = Columns::flexible(width.saturating_sub(1), &[18, 22], 2, 16);
     let rows = picker
         .presets
         .iter()
@@ -4707,14 +4776,22 @@ fn render_presets(frame: &mut Frame, picker: &PresetPicker) -> (Rect, RowsAt) {
         .collect();
 
     let rows_at = ListPane {
-        title: format!("presets {}", picker.presets.len()).into(),
+        title: PaneTitle::default(),
         focused: true,
         header: Some(columns.header(&["preset", "name", "base url"])),
         rows,
         selected: picker.cursor.index(),
         empty: vec!["no presets available".to_string()],
     }
-    .render_overlay(frame, area);
+    .body(frame, list);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "─".repeat(detail.width as usize),
+        Style::default().fg(palette::ACCENT_MUTED),
+    ))];
+    lines.extend(card.iter().map(|(label, value)| labelled(label, value)));
+    frame.render_widget(Paragraph::new(lines), detail);
+
     (area, rows_at)
 }
 
@@ -5017,7 +5094,13 @@ impl ListPane {
     fn fill(self, frame: &mut Frame, area: Rect, block: Block<'static>) -> RowsAt {
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        self.body(frame, inner)
+    }
 
+    /// The header, rows and empty state, into an area whose border is already
+    /// drawn. Split out so a panel can put something of its own beside the list
+    /// without the list drawing a second border inside the first.
+    fn body(self, frame: &mut Frame, inner: Rect) -> RowsAt {
         if self.rows.is_empty() {
             render_centered(frame, inner, &self.empty);
             return RowsAt::default();
@@ -5982,6 +6065,68 @@ mod render_tests {
         app.lens = Lens::Providers;
         let providers = screen(&mut app, 150, 30);
         assert!(!providers.contains("g registry"), "registry offered on providers:\n{providers}");
+    }
+
+    #[test]
+    fn every_preset_card_answers_what_applying_it_would_write() {
+        let presets = preset::all().expect("built-in presets");
+        assert!(!presets.is_empty(), "no presets to card");
+
+        for entry in &presets {
+            let card = preset_card(entry);
+            let labels: Vec<&str> = card.iter().map(|(label, _)| label.as_str()).collect();
+
+            // The four the picker's three columns could not answer.
+            for wanted in ["provider id", "base url", "wire api", "api key", "models"] {
+                assert!(labels.contains(&wanted), "{} has no {wanted}: {labels:?}", entry.id);
+            }
+            assert!(
+                card.iter().all(|(_, value)| !value.is_empty()),
+                "{} has a blank value: {card:?}",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_card_says_which_variable_a_key_comes_from() {
+        let presets = preset::all().expect("built-in presets");
+        let value = |entry: &Preset, label: &str| {
+            preset_card(entry)
+                .into_iter()
+                .find(|(name, _)| name == label)
+                .map(|(_, value)| value)
+                .unwrap_or_default()
+        };
+
+        // Hosted endpoints need a key and name the variable it is read from;
+        // knowing that before applying is the point of the card.
+        let hosted = presets
+            .iter()
+            .find(|entry| entry.api_key_env.is_some())
+            .expect("no preset reads a key from the environment");
+        let key = value(hosted, "api key");
+        assert!(key.starts_with("required, set $") || key.starts_with("from $"), "{key}");
+
+        // A local endpoint asks for nothing, and says so rather than blank.
+        if let Some(local) = presets.iter().find(|entry| entry.api_key_env.is_none()) {
+            assert_eq!(value(local, "api key"), "not required");
+        }
+    }
+
+    #[test]
+    fn the_preset_picker_shows_the_card_beside_the_list() {
+        let mut app = scene();
+        app.dispatch(Action::Preset(None));
+        let text = screen(&mut app, 110, 34);
+
+        // The list is still a list.
+        assert!(text.contains("preset") && text.contains("base url"), "no list:\n{text}");
+        // And the card under it answers the rest, for whatever the cursor is on.
+        for label in ["provider id", "wire api", "api key", "models"] {
+            assert!(text.contains(label), "card missing {label}:\n{text}");
+        }
+        assert!(text.contains("enter apply"), "no way to apply what is shown:\n{text}");
     }
 
     /// The skills pane, on the agent that has any.
