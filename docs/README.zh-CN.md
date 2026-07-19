@@ -27,8 +27,9 @@
 ---
 
 Codex、Claude Code 和 opencode 各自把端点存在不同的文件里，格式不同，同一个概念还
-用不同的名字。加一个供应商，或者在两个之间切换，就得手动打开三个文件。ConfAI 用一
-条命令搞定，并且绝不重新格式化它没有改动的部分。
+用不同的名字。它们启动的 MCP 服务器、加载的技能，情况也完全一样。加一个供应商，或
+者在两个之间切换，就得手动打开三个文件。ConfAI 用一条命令搞定，并且绝不重新格式化
+它没有改动的部分。
 
 ## 安装
 
@@ -48,8 +49,7 @@ irm https://github.com/redstone-md/ConfAI/releases/latest/download/install.ps1 |
 才把二进制文件放到位。把网上的脚本直接管道给 shell 是一个信任问题，需要你自己判
 断；[INSTALL.md](../INSTALL.md) 说明了如何先读一遍再运行。
 
-通过 cargo 安装，前提是 crate 已发布到 crates.io —— 截至 v0.0.1 尚未发布，所以下面
-两条命令目前还无法使用：
+通过 cargo 安装：
 
 ```sh
 cargo install confai --locked    # 从源码构建，需要 Rust 1.88+
@@ -76,6 +76,8 @@ opencode     binary + config  11         vendor              ~/.config/opencode/
 - 一条命令切换所有拥有该端点的智能体：`confai provider use primary`。
 - 一个预设把同一个端点写进所有智能体：`confai preset apply byesu --all --use`。
 - `confai provider sync` 拉取端点实际提供的模型列表，连同上下文和输出上限一起写入。
+- `confai mcp list` 和 `confai skill list` 对智能体启动的 MCP 服务器和加载的技能做
+  同样的事。
 - 注释、键的顺序和未知的键都会在编辑后保留。每次写入前都会备份，`confai undo` 可以
   还原。
 
@@ -119,6 +121,13 @@ confai undo                               # 还原成之前的样子
 | `provider sync <id>` | 把模型列表写进配置 |
 | `preset list` · `preset show <id>` | 有哪些预设，以及某个预设会写入什么 |
 | `preset apply <id>` | 把预设的端点写进所选智能体 |
+| `mcp list` · `mcp doctor` | 各智能体启动的 MCP 服务器 · 每个能否启动 |
+| `mcp add <name>` · `mcp remove <name>` | 添加或修改服务器 · 删除服务器 |
+| `mcp toggle <name>` | 在智能体支持的前提下，关掉服务器而不删除 |
+| `mcp preset list` · `mcp preset apply <id>` | 现成的服务器配方，以及套用其中一个 |
+| `skill list` · `skill path` | 各智能体装了哪些技能 · 技能存放位置 |
+| `skill doctor` | 智能体会默默忽略的技能，以及原因 |
+| `skill copy <name>` · `skill remove <name>` | 在智能体之间复制技能 · 删除技能 |
 | `model [model]` | 查看或设置智能体使用的模型 |
 | `path` · `edit` | 打印智能体的配置路径 · 用 `$EDITOR` 打开 |
 | `doctor` | 检查每个配置都能解析、引用的每个供应商都能解析得通 |
@@ -132,8 +141,79 @@ confai undo                               # 还原成之前的样子
 `provider sync` 有 `--prune`、`--dry-run` 和 `--refresh`。`preset apply` 有
 `--api-key`、`--use` 和 `--sync`。
 
-`list`、`doctor`、`about`、`update` 和 `preset list` 不接受智能体选择参数 —— 它们
-始终覆盖全部。
+`list`、`doctor`、`about`、`update`、`preset list` 和 `mcp preset list` 不接受智能
+体选择参数 —— 它们始终覆盖全部。`skill copy` 和 `skill remove` 有自己的一套：
+`--from` / `--to`，以及必填的 `--agent`。
+
+</details>
+
+<details>
+<summary><b>MCP 服务器</b> —— 同一份清单，三种不同的配置形态</summary>
+
+每个智能体都启动自己的一组 MCP 服务器，而这三者记录它们的方式和位置都不一样。Codex
+把它们放在 TOML 的 `mcp_servers` 里，形式是一个命令加一个单独的 `args` 列表。Claude
+Code 把它们放在 `~/.claude.json` 的 `mcpServers` 里 —— 这是第三个文件，不是
+`settings.json`。opencode 把它们放在配置的 `mcp` 里，那里命令是一个列表，而不是程
+序加参数；环境变量块叫 `environment` 而不是 `env`；而且服务器可以关掉而不必删除。
+
+```sh
+confai mcp list --all
+confai mcp add context7 --agent claude --command npx --arg -y --arg @upstash/context7-mcp
+confai mcp add sentry --agent opencode --url https://mcp.example.com/mcp
+confai mcp toggle playwright --off
+confai mcp remove playwright --agent codex
+confai mcp doctor --all
+confai mcp preset list
+confai mcp preset apply github --all
+```
+
+`mcp add` 对 stdio 服务器接受 `--command` 加上可重复且保持顺序的 `--arg`，对远程服
+务器则接受 `--url`，另外还有可重复的 `--env KEY=VALUE`。`mcp doctor` 有
+`--timeout`（秒，默认 10）。`mcp preset apply` 有 `--name`，用于以预设 id 之外的名
+字记录该服务器。
+
+**`confai mcp doctor` 不会启动任何东西。** 对 stdio 服务器，它在 `PATH` 上解析可执
+行文件；对远程服务器，它请求该端点。把配置里任意一条命令跑起来看会发生什么，这不是
+诊断，而是在执行配置里写着的东西。`npx` 这类启动器会被如实报告为启动器，因为不把背
+后的包取下来就无法验证它。
+
+`~/.claude.json` 保存着实时的会话状态，Claude Code 会持续写入，所以 ConfAI 只在
+MCP 编辑确实改动了内容时才重写它，而不是毫无必要地和智能体抢这个文件。
+
+`mcp toggle` 在智能体有地方记录该状态时才有效，目前是 opencode。Codex 和 Claude
+Code 没有停用标志；ConfAI 会明说，并让你改为删除该服务器，而不是假装做到了。
+
+九个内置配方放在 [`presets/mcp/`](../presets/mcp/)：continuum、context7、
+playwright、github、git、fetch、filesystem、memory 和 sequential-thinking。你自己
+的放在 `~/.confai/presets/mcp/`。
+
+</details>
+
+<details>
+<summary><b>技能</b> —— 各智能体装了什么，又在默默忽略什么</summary>
+
+技能是一个包含 `SKILL.md` 的目录，智能体靠扫描目录来发现它。Claude Code 和 opencode
+都是这样，目录是配置文件旁边的 `skills/`。Codex 完全没有技能这一机制 —— 它的插件是
+另一套东西 —— ConfAI 会如实说明，而不是为它凭空造一个目录。
+
+```sh
+confai skill list --all
+confai skill path --all
+confai skill doctor --all
+confai skill copy context7 --from claude --to opencode
+confai skill remove context7 --agent opencode
+```
+
+`skill copy` 必须指定 `--from`；不指定 `--to` 就会装进其他每一个保存技能的智能体，
+`--force` 则会覆盖目标处同名的技能。这个命令的存在，是因为同一个技能对多个智能体都
+有用，却没有一个共用的地方来存放它。
+
+`skill doctor` 会报告技能最终无人加载、又无人吭声的几种原因：目录里没有可读的
+`SKILL.md`；front matter 里没有 `description`，智能体无从判断何时该用它；或者
+front matter 里的 `name` 与目录名不一致 —— 智能体是按目录名来引用技能的。
+
+`skill remove` 必须指定 `--agent`，它删除的是一个目录。目录没有像配置文件那样的备
+份，所以 **`confai undo` 找不回来。** 删除之前，它会先打印将要删除的路径。
 
 </details>
 
@@ -153,20 +233,41 @@ confai undo                               # 还原成之前的样子
   <img src="../assets/screenshots/detail.png" alt="供应商详情视图，显示端点的字段和模型列表" width="900">
 </p>
 
+`v` 让右栏在三种视图之间循环：供应商 → MCP 服务器 → 技能 → 供应商。智能体没有的那
+一种会被跳过，所以在 Codex 上只在供应商和 MCP 服务器之间循环，因为 Codex 没有技能。
+
+以下按键在任何视图下都有效：
+
 | 按键 | |
 |---|---|
 | `Ctrl+P` / `Ctrl+K` | 命令面板 —— 全部动作，可搜索 |
 | `↑` `↓` / `k` `j` | 移动 · `Tab` `←` `→` 切换栏 |
-| `Enter` | 端点详情，含模型列表 |
-| `/` 或 `Ctrl+F` | 按 id、主机或模型过滤端点 |
-| `u` | 让当前智能体走选中的端点 |
+| `v` | 循环切换右栏的视图 |
+| `/` 或 `Ctrl+F` | 按 id、主机或模型过滤列表 |
 | `m` | 选择该智能体使用的模型 |
-| `a` `e` `d` | 新增 · 编辑 · 删除 |
-| `c` / `C` | 检查此端点 · 检查全部 |
 | `s` / `S` | 同步模型 · 同步并清理已下线的 |
-| `p` | 应用预设 |
 | `?` | 关于，以及完整按键表 |
 | `r` `q` | 从磁盘重新加载 · 退出 |
+
+其余按键作用于右栏当前显示的内容：
+
+| 按键 | 供应商 | MCP 服务器 | 技能 |
+|---|---|---|---|
+| `Enter` | 详情 | 详情 | 详情 |
+| `u` | 让智能体走它 | 开启或关闭 | — |
+| `a` | 新增 | 新增 | — |
+| `e` | 编辑 | 编辑 | — |
+| `d` | 删除 | 删除 | 删除，需确认 |
+| `c` / `C` | 检查 · 检查全部 | 检查 · 检查全部 | — |
+| `p` | 应用预设 | 添加现成的服务器 | — |
+| `y` | — | — | 复制到另一个智能体 |
+
+**技能没有新增，也没有编辑。** 技能不是在列表视图里写出来的，那是文本编辑器的事。
+在技能视图下，这些键什么也不做，而不是抛出一个错误。
+
+**删除技能是本程序唯一不可撤销的操作。** 其他任何删除都是重写配置文件，`confai
+undo` 能从事先留下的备份中还原。技能是一个目录，而目录没有备份，所以确认提示会在删
+除任何东西之前把这一点说清楚。
 
 鼠标可用：单击选中，再次单击打开，滚轮滚动，点击提示条即可执行。
 
@@ -250,6 +351,14 @@ Chutes、Baseten、Vercel AI Gateway、Venice、Novita、Byesu、Ollama 和 LM S
 | Codex | `~/.codex/config.toml` | 同一文件 | 有 | 无 | `model_provider` |
 | Claude Code | `~/.claude/settings.json` | `env` 块 | 由 ConfAI 提供 | 无 | `ANTHROPIC_*` |
 | opencode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` | 有 | 有 | `provider/model` |
+
+MCP 服务器和技能又各有各的位置：
+
+| 智能体 | MCP 服务器 | 能否停用 | 技能 |
+|---|---|---|---|
+| Codex | `config.toml` 里的 `mcp_servers` | 否 | 无 —— 插件是另一套机制 |
+| Claude Code | `~/.claude.json` 里的 `mcpServers` | 否 | `~/.claude/skills/` |
+| opencode | `opencode.json` 里的 `mcp` | 是 | 配置文件旁的 `skills/` |
 
 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`OPENCODE_CONFIG` 和 `XDG_CONFIG_HOME` 都会被
 遵循，方式与这些智能体自己的行为一致。

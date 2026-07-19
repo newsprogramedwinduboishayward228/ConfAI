@@ -27,7 +27,8 @@
 ---
 
 Codex, Claude Code y opencode guardan sus endpoints cada uno en un archivo
-distinto, en un formato distinto y con un nombre distinto para la misma idea.
+distinto, en un formato distinto y con un nombre distinto para la misma idea. Con
+los servidores MCP que lanzan y las skills que cargan pasa exactamente lo mismo.
 Añadir un proveedor o cambiar entre dos de ellos significa abrir tres archivos a
 mano. ConfAI lo hace con un solo comando, y nunca reformatea lo que no ha
 cambiado.
@@ -52,8 +53,7 @@ colocan el binario. Canalizar un script de internet hacia una shell es una
 decisión de confianza; en [INSTALL.md](../INSTALL.md) se explica cómo leerlo
 antes.
 
-Con cargo, una vez que el crate esté publicado en crates.io — a fecha de la
-v0.0.1 no lo está, así que estos dos comandos todavía no funcionan:
+Con cargo:
 
 ```sh
 cargo install confai --locked    # compila desde el código, necesita Rust 1.88+
@@ -84,6 +84,8 @@ opencode     binary + config  11         vendor              ~/.config/opencode/
   `confai preset apply byesu --all --use`.
 - `confai provider sync` rellena la lista de modelos que el endpoint sirve de
   verdad, con sus límites de contexto y de salida.
+- `confai mcp list` y `confai skill list` hacen lo mismo con los servidores MCP
+  que lanza un agente y las skills que carga.
 - Los comentarios, el orden de las claves y las claves desconocidas sobreviven a
   una edición. Cada escritura se respalda antes, y `confai undo` la deshace.
 
@@ -128,6 +130,13 @@ dos, los comandos de lectura cubren todo y los de escritura te piden elegir.
 | `provider sync <id>` | escribe la lista de modelos en la configuración |
 | `preset list` · `preset show <id>` | qué recetas existen, y qué escribiría una de ellas |
 | `preset apply <id>` | escribe el endpoint de un preset en los agentes seleccionados |
+| `mcp list` · `mcp doctor` | los servidores MCP de cada agente · si cada uno podría arrancar |
+| `mcp add <name>` · `mcp remove <name>` | añade o edita un servidor · elimina uno |
+| `mcp toggle <name>` | apaga un servidor sin eliminarlo, donde el agente lo permita |
+| `mcp preset list` · `mcp preset apply <id>` | recetas de servidores listas, y cómo aplicarlas |
+| `skill list` · `skill path` | las skills de cada agente · dónde las guarda |
+| `skill doctor` | las skills que el agente ignorará en silencio, y por qué |
+| `skill copy <name>` · `skill remove <name>` | copia una skill entre agentes · elimina una |
 | `model [model]` | muestra o fija el modelo que usa un agente |
 | `path` · `edit` | imprime la ruta del config · lo abre en `$EDITOR` |
 | `doctor` | comprueba que todo config parsea y que cada proveedor referenciado resuelve |
@@ -142,8 +151,92 @@ segundos, 10 por defecto. `provider models` acepta `--select <model>` y
 `--refresh`. `provider sync` acepta `--prune`, `--dry-run` y `--refresh`.
 `preset apply` acepta `--api-key`, `--use` y `--sync`.
 
-`list`, `doctor`, `about`, `update` y `preset list` no aceptan selector de
-agente: siempre lo cubren todo.
+`list`, `doctor`, `about`, `update`, `preset list` y `mcp preset list` no aceptan
+selector de agente: siempre lo cubren todo. `skill copy` y `skill remove` tienen
+el suyo propio: `--from` / `--to` y un `--agent` obligatorio.
+
+</details>
+
+<details>
+<summary><b>Servidores MCP</b> — una sola lista, tres formas de config distintas</summary>
+
+Cada agente lanza su propio conjunto de servidores MCP, y los tres los registran
+de forma distinta y en sitios distintos. Codex los guarda bajo `mcp_servers` en
+su TOML, como un comando más una lista `args` aparte. Claude Code los guarda bajo
+`mcpServers` en `~/.claude.json` — un tercer archivo, no `settings.json`.
+opencode los guarda bajo `mcp` en su config, donde el comando es una única lista
+en lugar de un programa y sus argumentos, el bloque de entorno se llama
+`environment` y no `env`, y un servidor puede apagarse sin borrarlo.
+
+```sh
+confai mcp list --all
+confai mcp add context7 --agent claude --command npx --arg -y --arg @upstash/context7-mcp
+confai mcp add sentry --agent opencode --url https://mcp.example.com/mcp
+confai mcp toggle playwright --off
+confai mcp remove playwright --agent codex
+confai mcp doctor --all
+confai mcp preset list
+confai mcp preset apply github --all
+```
+
+`mcp add` acepta `--command` junto a un `--arg` repetible que conserva el orden
+para un servidor stdio, o `--url` para uno remoto, más un `--env CLAVE=VALOR`
+repetible. `mcp doctor` acepta `--timeout` en segundos, 10 por defecto.
+`mcp preset apply` acepta `--name` para registrar el servidor con un nombre
+distinto al id del preset.
+
+**`confai mcp doctor` no lanza nada.** Para un servidor stdio resuelve el
+ejecutable en el `PATH`; para uno remoto llama al endpoint. Ejecutar un comando
+cualquiera sacado de la configuración a ver qué pasa no es un diagnóstico, es
+ejecutar lo que haya en el config. Un lanzador tipo `npx` se reporta como el
+lanzador que es, ya que el paquete que hay detrás no se puede verificar sin
+descargarlo.
+
+`~/.claude.json` contiene estado de sesión en vivo y Claude Code escribe en él
+continuamente, así que ConfAI solo lo reescribe cuando una edición de MCP ha
+cambiado algo de verdad, en vez de competir con el agente sin motivo.
+
+`mcp toggle` funciona donde el agente tiene dónde anotar ese estado, que hoy
+significa opencode. Codex y Claude Code no tienen una marca para desactivar;
+ConfAI lo dice y te indica que elimines el servidor, en lugar de aparentar que sí.
+
+Las nueve recetas integradas están en [`presets/mcp/`](../presets/mcp/):
+continuum, context7, playwright, github, git, fetch, filesystem, memory y
+sequential-thinking. Las tuyas van en `~/.confai/presets/mcp/`.
+
+</details>
+
+<details>
+<summary><b>Skills</b> — qué tiene cada agente, y qué está ignorando sin decirlo</summary>
+
+Una skill es un directorio con un `SKILL.md` dentro, que el agente descubre
+recorriendo el directorio. Claude Code y opencode funcionan así, en un `skills/`
+junto a su config. Codex no tiene skills en absoluto — sus plugins son un
+mecanismo aparte — y ConfAI lo dice en vez de inventarle un directorio.
+
+```sh
+confai skill list --all
+confai skill path --all
+confai skill doctor --all
+confai skill copy context7 --from claude --to opencode
+confai skill remove context7 --agent opencode
+```
+
+`skill copy` necesita `--from`; si omites `--to`, la instala en todos los demás
+agentes que guarden skills, y `--force` reemplaza una que el destino ya tenga con
+ese nombre. Existe porque la misma skill le sirve a más de un agente y no hay un
+sitio común donde guardarla.
+
+`skill doctor` informa de las formas en que una skill acaba sin que nadie la
+cargue y sin que nadie lo mencione: un directorio sin un `SKILL.md` legible, un
+front matter sin `description` con el que el agente pueda saber cuándo usarla, o
+un `name` en el front matter que no coincide con el nombre del directorio — los
+agentes se refieren a una skill por su directorio.
+
+`skill remove` exige `--agent` y borra un directorio. No hay copia de seguridad
+para un directorio como la hay para un archivo de configuración, así que
+**`confai undo` no lo va a recuperar.** Antes de borrar, imprime la ruta que está
+a punto de eliminar.
 
 </details>
 
@@ -164,20 +257,44 @@ la lista de modelos con sus límites de contexto y de salida:
   <img src="../assets/screenshots/detail.png" alt="La vista de detalle del proveedor, con los campos del endpoint y su lista de modelos" width="900">
 </p>
 
+`v` recorre el panel derecho por tres vistas: proveedores → servidores MCP →
+skills → proveedores. Se salta la vista que el agente no tenga, así que en Codex
+alterna solo entre proveedores y servidores MCP, porque Codex no guarda skills.
+
+Estas funcionan sea cual sea la vista:
+
 | tecla | |
 |---|---|
 | `Ctrl+P` / `Ctrl+K` | paleta de comandos — todas las acciones, con búsqueda |
 | `↑` `↓` / `k` `j` | moverse · `Tab` `←` `→` cambiar de panel |
-| `Enter` | detalle del endpoint, con su lista de modelos |
-| `/` o `Ctrl+F` | filtrar endpoints por id, host o modelo |
-| `u` | enrutar este agente por el endpoint seleccionado |
+| `v` | recorrer las vistas del panel derecho |
+| `/` o `Ctrl+F` | filtrar la lista por id, host o modelo |
 | `m` | elegir qué modelo usa este agente |
-| `a` `e` `d` | añadir · editar · eliminar |
-| `c` / `C` | comprobar este endpoint · comprobarlos todos |
 | `s` / `S` | sincronizar modelos · sincronizar y podar los obsoletos |
-| `p` | aplicar un preset |
 | `?` | acerca de, y el mapa de teclas completo |
 | `r` `q` | recargar desde disco · salir |
+
+El resto actúan sobre lo que el panel derecho esté mostrando:
+
+| tecla | proveedores | servidores MCP | skills |
+|---|---|---|---|
+| `Enter` | detalle | detalle | detalle |
+| `u` | enrutar el agente por él | encenderlo o apagarlo | — |
+| `a` | añadir | añadir | — |
+| `e` | editar | editar | — |
+| `d` | eliminar | eliminar | eliminar, tras confirmar |
+| `c` / `C` | comprobar · comprobar todos | comprobar · comprobar todos | — |
+| `p` | aplicar un preset | añadir un servidor ya preparado | — |
+| `y` | — | — | copiar a otro agente |
+
+**Para las skills no hay añadir ni editar.** Una skill no se escribe en una vista
+de lista; para eso está un editor de texto. Esas teclas simplemente no hacen nada
+en la vista de skills, en lugar de soltarte un error.
+
+**Borrar una skill es lo único irreversible que hace ConfAI.** Cualquier otro
+borrado reescribe un archivo de configuración, y `confai undo` lo restaura desde
+la copia hecha antes. Una skill es un directorio, y de un directorio no hay
+copia, así que la confirmación lo dice tal cual antes de eliminar nada.
 
 El ratón funciona: clic para seleccionar, otro clic para abrir, rueda para
 desplazarse, clic en una pista para ejecutarla.
@@ -271,6 +388,14 @@ sobrescriben a un integrado con el mismo id.
 | Codex | `~/.codex/config.toml` | mismo archivo | sí | no | `model_provider` |
 | Claude Code | `~/.claude/settings.json` | bloque `env` | vía ConfAI | no | `ANTHROPIC_*` |
 | opencode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` | sí | sí | `provider/model` |
+
+Los servidores MCP y las skills viven, otra vez, en otro sitio:
+
+| Agente | Servidores MCP | Se pueden desactivar | Skills |
+|---|---|---|---|
+| Codex | `mcp_servers` en `config.toml` | no | ninguna — los plugins son otro mecanismo |
+| Claude Code | `mcpServers` en `~/.claude.json` | no | `~/.claude/skills/` |
+| opencode | `mcp` en `opencode.json` | sí | `skills/` junto al config |
 
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG` y `XDG_CONFIG_HOME` se
 respetan, igual que los respetan los propios agentes.
