@@ -553,6 +553,8 @@ enum Action {
     Reload,
     /// Check every config, provider and selection, and report what is wrong.
     Doctor,
+    /// Ask now whether a newer release exists.
+    Update,
     Palette,
     Help,
     Quit,
@@ -576,6 +578,7 @@ fn menu() -> Vec<Action> {
         Action::Lens(None),
         Action::Reload,
         Action::Doctor,
+        Action::Update,
         Action::Palette,
         Action::Help,
         Action::Quit,
@@ -641,6 +644,7 @@ impl Action {
             Action::SkillCopy => "copy skill to another agent".into(),
             Action::Reload => "reload from disk".into(),
             Action::Doctor => "doctor".into(),
+            Action::Update => "check for updates".into(),
             Action::Palette => "command palette".into(),
             Action::Help => "help".into(),
             Action::Quit => "quit".into(),
@@ -677,6 +681,7 @@ impl Action {
             Action::SkillCopy => "copy",
             Action::Reload => "reload",
             Action::Doctor => "doctor",
+            Action::Update => "update",
             Action::Palette => "commands",
             Action::Help => "help",
             Action::Quit => "quit",
@@ -723,6 +728,7 @@ impl Action {
             Action::SkillCopy => "copy this skill into another agent's skills directory".into(),
             Action::Reload => "re-read every config from disk".into(),
             Action::Doctor => "check every config parses and every selected provider exists".into(),
+            Action::Update => "ask whether a newer release of this program exists".into(),
             Action::Palette => "search every action by name".into(),
             Action::Help => "the about screen and the full key map".into(),
             Action::Quit => format!("leave {}", brand::NAME),
@@ -760,6 +766,10 @@ impl Action {
             Action::SkillCopy => "y",
             Action::Reload => "r",
             Action::Doctor => "D",
+            // No key: it reaches the network for something the start-up notice
+            // already reports, so it belongs in the palette rather than under a
+            // finger beside the keys that edit a config.
+            Action::Update => return None,
             Action::Palette => "ctrl+p or ctrl+k",
             Action::Help => "?",
             Action::Quit => "q",
@@ -806,7 +816,8 @@ impl Action {
             | Action::Reload
             | Action::Palette
             | Action::Filter
-            | Action::Doctor => None,
+            | Action::Doctor
+            | Action::Update => None,
             Action::SelectAgent(_) => None,
             Action::Add | Action::Preset(_) | Action::Use(Some(_)) => no_agent(),
             // Enter on the agent pane only moves the focus, so it is always fine.
@@ -910,6 +921,7 @@ impl Action {
                 app.say(Tone::Info, "reloaded from disk");
             }
             Action::Doctor => app.open_doctor(),
+            Action::Update => app.schedule(Job::Update, "asking about the latest release…"),
             Action::Palette => app.open_palette(),
             Action::Help => app.overlay = Some(Overlay::About { scroll: 0 }),
             Action::Quit => app.quit = true,
@@ -1428,6 +1440,37 @@ fn doctor(agents: &[AgentEntry]) -> Report {
     report
 }
 
+/// What an update check found, as a report.
+///
+/// The upgrade commands themselves stay in the CLI: this program deliberately
+/// does not replace its own binary, and the installer list they are built from
+/// lives there.
+fn update_report(status: &crate::update::Status) -> Report {
+    let mut report = Report::new("update");
+
+    match status {
+        crate::update::Status::UpToDate { current } => {
+            report.line(Tone::Good, format!("{current} is the latest release"));
+        }
+        crate::update::Status::Unreleased { current, latest } => {
+            report.line(
+                Tone::Info,
+                format!("this build is {current}, ahead of the latest release {latest}"),
+            );
+        }
+        crate::update::Status::Newer(available) => {
+            report.line(Tone::Good, format!("{} → {}", available.current, available.latest));
+            for line in available.headline(8) {
+                report.nested(Tone::Info, line);
+            }
+            report.blank();
+            report.line(Tone::Info, available.url.clone());
+            report.line(Tone::Info, "run `confai update` for the upgrade commands");
+        }
+    }
+    report
+}
+
 /// The command palette: a query and the actions it still matches.
 struct CommandPalette {
     query: String,
@@ -1592,6 +1635,9 @@ enum Job {
     Sync {
         prune: bool,
     },
+    /// Ask GitHub for the latest release, rather than waiting for the notice the
+    /// next start would show.
+    Update,
 }
 
 /// Where a list was last drawn and how far it had scrolled, so a click can be
@@ -2174,7 +2220,30 @@ impl App {
             Job::McpCheck => self.mcp_check_selected(),
             Job::McpCheckAll => self.mcp_check_all(terminal),
             Job::Sync { prune } => self.sync_selected(prune),
+            Job::Update => self.check_update(),
         }
+    }
+
+    /// Check for a new release now and report what came back.
+    fn check_update(&mut self) {
+        let status = match crate::update::check_now() {
+            Ok(status) => status,
+            Err(err) => return self.say(Tone::Bad, format!("update check failed: {err:#}")),
+        };
+
+        let (tone, note) = match &status {
+            crate::update::Status::UpToDate { current } => {
+                (Tone::Good, format!("{current} is the latest release"))
+            }
+            crate::update::Status::Unreleased { .. } => {
+                (Tone::Info, "this build is ahead of the latest release".to_string())
+            }
+            crate::update::Status::Newer(available) => {
+                (Tone::Good, format!("{} is available", available.latest))
+            }
+        };
+        self.overlay = Some(Overlay::Report(update_report(&status)));
+        self.say(tone, note);
     }
 
     /// Check one MCP server and remember the verdict for the health column.
@@ -5168,6 +5237,55 @@ mod render_tests {
         assert!(text.contains("doctor"), "no report title:\n{text}");
         assert!(text.contains("is not configured"), "the finding is not on screen:\n{text}");
         assert!(text.contains("doctor found"), "nothing said on the status line:\n{text}");
+    }
+
+    fn version(text: &str) -> semver::Version {
+        text.parse().expect("version")
+    }
+
+    #[test]
+    fn an_update_check_reports_every_outcome_it_can_have() {
+        let up_to_date =
+            update_report(&crate::update::Status::UpToDate { current: version("0.0.3") });
+        assert!(findings(&up_to_date).contains("0.0.3 is the latest release"));
+
+        // Running from a working tree is normal, not a fault.
+        let unreleased = update_report(&crate::update::Status::Unreleased {
+            current: version("0.1.0"),
+            latest: version("0.0.3"),
+        });
+        assert!(findings(&unreleased).contains("ahead of the latest release 0.0.3"));
+        assert_eq!(unreleased.problems, 0);
+    }
+
+    #[test]
+    fn a_newer_release_is_reported_with_what_changed_in_it() {
+        let available = crate::update::Available {
+            current: version("0.0.3"),
+            latest: version("0.1.0"),
+            notes: "## 0.1.0\n\n- skills as a third lens\n- clickable lens tabs\n".into(),
+            url: "https://example.invalid/releases/0.1.0".into(),
+        };
+        let report = update_report(&crate::update::Status::Newer(Box::new(available)));
+        let text = findings(&report);
+
+        assert!(text.contains("0.0.3 → 0.1.0"), "no version delta:\n{text}");
+        // The changelog is the reason to care, so it is in the report.
+        assert!(text.contains("skills as a third lens"), "no changelog bullets:\n{text}");
+        assert!(text.contains("https://example.invalid/releases/0.1.0"), "no link:\n{text}");
+        // This program does not replace its own binary; the CLI names the way.
+        assert!(text.contains("confai update"), "no route to the upgrade:\n{text}");
+    }
+
+    #[test]
+    fn the_update_check_is_announced_before_it_reaches_the_network() {
+        let mut app = scene();
+        app.dispatch(Action::Update);
+
+        // The job is queued, not run: the frame saying so has to land first.
+        assert!(matches!(app.pending, Some(Job::Update)), "the check was not scheduled");
+        assert!(app.status.text.contains("latest release"), "unannounced: {:?}", app.status.text);
+        assert!(app.overlay.is_none(), "the report cannot exist before the check ran");
     }
 
     /// The skills pane, on the agent that has any.
