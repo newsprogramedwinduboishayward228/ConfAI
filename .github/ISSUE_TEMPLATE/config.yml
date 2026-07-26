@@ -1,8 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: redstone.md
-    url: https://redstone.md
-    about: The project's website.
-  - name: Security vulnerability
-    url: https://github.com/redstone-md/ConfAI/security/advisories/new
-    about: Report privately instead of opening an issue. See SECURITY.md.
